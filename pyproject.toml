@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "onlinecompile"
+version = "0.1.0"
+description = "Collaborative online Python editor for educational sessions"
+authors = ["avoselection"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.30.0"}
+bcrypt = "^4.1.3"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.3,<10.0.0)",
+    "pytest-asyncio (>=1.3.0,<2.0.0)",
+    "httpx (>=0.28.1,<0.29.0)"
+]
