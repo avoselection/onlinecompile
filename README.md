@@ -20,7 +20,7 @@ poetry run python server.py
 - логин: `HOST`
 - пароль: `Example1`
 
-Для нормальной эксплуатации создайте `config.json` на основе `config.example.json` и замените пароль. Чтобы получить bcrypt-хеш:
+Для нормальной эксплуатации создайте (или скачайте) `config.json` и замените пароль. Чтобы получить bcrypt-хеш:
 
 ```bash
 poetry run python server.py --hash-password "новый пароль"
