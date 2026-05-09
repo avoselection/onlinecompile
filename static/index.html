@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>onlinecompile</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260509-v5" />
+</head>
+<body class="app-locked">
+  <section id="entryScreen" class="entry-screen">
+    <div class="entry-card">
+      <div class="entry-brand">
+        <span class="entry-badge">onlinecompile</span>
+        <h1>Вход в систему совместного редактирования кода</h1>
+        <p>
+          Сначала выберите тип пользователя, затем укажите параметры входа и комнату.
+          После авторизации откроется основная рабочая страница системы.
+        </p>
+      </div>
+
+      <div class="role-selector" aria-label="Выбор типа пользователя">
+        <button type="button" class="role-card active" data-role="host">
+          <strong>Преподаватель</strong>
+          <span>Создание комнаты, управление доступом, запуск и проверка кода</span>
+        </button>
+        <button type="button" class="role-card" data-role="student">
+          <strong>Студент</strong>
+          <span>Подключение к существующей комнате и работа по выданному доступу</span>
+        </button>
+      </div>
+
+      <div id="authError" class="auth-error" hidden></div>
+
+      <div id="hostPane" class="entry-pane">
+        <div class="mode-selector" aria-label="Режим преподавателя">
+          <button type="button" class="mode-btn active" data-mode="create">Создать комнату</button>
+          <button type="button" class="mode-btn" data-mode="join">Войти в существующую комнату</button>
+        </div>
+
+        <div class="entry-grid">
+          <label>
+            <span>Отображаемое имя</span>
+            <input id="hostNameInput" type="text" placeholder="Ведущий" autocomplete="name" />
+          </label>
+          <label>
+            <span>Логин преподавателя</span>
+            <input id="hostUsernameInput" type="text" placeholder="Ведущий" autocomplete="username" />
+          </label>
+          <label>
+            <span>Пароль</span>
+            <input id="hostPasswordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" />
+          </label>
+          <label>
+            <span>Комната</span>
+            <input id="hostRoomInput" type="text" placeholder="onlinecompile" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="entry-actions">
+          <button type="button" id="hostStartBtn" class="primary-action">Перейти в рабочую страницу преподавателя</button>
+        </div>
+      </div>
+
+      <div id="studentPane" class="entry-pane" hidden>
+        <div class="entry-grid single-role-grid">
+          <label>
+            <span>Имя студента</span>
+            <input id="studentNameInput" type="text" placeholder="Student" autocomplete="name" />
+          </label>
+          <label>
+            <span>Комната для входа</span>
+            <input id="studentRoomInput" type="text" placeholder="onlinecompile" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="entry-actions">
+          <button type="button" id="studentStartBtn" class="primary-action">Перейти в рабочую страницу студента</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="toast" class="toast" aria-live="polite"></div>
+
+  <div id="easterEgg" class="easter-egg" hidden>
+    <div class="easter-egg-card">
+      <button type="button" id="closeEasterEgg" class="easter-close" aria-label="Закрыть">×</button>
+      <div class="easter-label">Konami code accepted</div>
+      <div class="easter-title">avoselection</div>
+      <p>Автор данного всего прикола, всем привет</p>
+    </div>
+  </div>
+
+  <div class="layout" id="appLayout" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand-title">
+          <h1>onlinecompile</h1>
+          <span id="roomInfo" class="room-subtitle">Комната: —</span>
+        </div>
+        <span id="sessionInfo" class="info-chip">Вы: —</span>
+        <span id="connectionBadge" class="info-chip" data-state="idle">Не подключено</span>
+        <span id="autosaveBadge" class="info-chip">Автосохранение: ожидание</span>
+        <span id="hostStatusBadge" class="info-chip">Ведущий: онлайн</span>
+      </div>
+
+      <div class="topbar-right">
+        <label class="theme-switcher" for="themeSelect">
+          <span>Тема</span>
+          <select id="themeSelect" aria-label="Тема оформления">
+            <option value="system" selected>Системная</option>
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+            <option value="avo">Avo</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <div id="hostControls" class="teacher-toolbar">
+      <div class="tool-group tool-group-files" aria-label="Файлы">
+        <span class="tool-group-label">Файлы</span>
+        <select id="fileSelect" title="Текущий файл"></select>
+        <button type="button" id="createFileBtn" class="host-only">Новый</button>
+        <button type="button" id="importFileBtn" class="host-only">Импорт</button>
+        <button type="button" id="downloadFileBtn">Скачать</button>
+        <button type="button" id="downloadAllBtn" class="host-only">Скачать всё</button>
+        <input id="importFileInput" type="file" accept=".py,.txt,text/plain" hidden />
+      </div>
+
+      <div class="tool-group tool-group-access host-only" aria-label="Доступы">
+        <span class="tool-group-label">Доступ</span>
+        <select id="participantSelect" title="Студент"></select>
+        <button type="button" id="grantBtn">Выдать</button>
+        <button type="button" id="revokeBtn">Забрать</button>
+      </div>
+
+      <div class="tool-group tool-group-ranges host-only" aria-label="Диапазоны строк">
+        <span class="tool-group-label">Строки</span>
+        <input id="regionStart" type="number" min="1" placeholder="От" />
+        <input id="regionEnd" type="number" min="1" placeholder="До" />
+        <button type="button" id="setRegionBtn">Диапазон</button>
+        <button type="button" id="clearRegionBtn">Сброс</button>
+      </div>
+
+      <div class="tool-group tool-group-reports host-only" aria-label="Отчёты">
+        <span class="tool-group-label">Отчёты</span>
+        <button type="button" id="blameReportBtn">Blame</button>
+        <button type="button" id="scoreReportBtn">Доступы</button>
+      </div>
+    </div>
+
+    <main>
+      <section class="editor-panel">
+        <div class="editor-toolbar">
+          <div class="editor-meta">
+            <span class="info-chip">Файл: <strong id="currentFile">main.py</strong></span>
+            <span id="lspStatus" class="info-chip">Monaco Editor</span>
+            <span id="editingUsers" class="editing-users" hidden></span>
+          </div>
+        </div>
+
+        <div class="editor-body">
+          <div id="gutter">1</div>
+
+          <div id="editorStage">
+            <div id="editorMount" aria-label="Python editor"></div>
+            <textarea id="editor" spellcheck="false" wrap="off" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+            <div id="remoteCursors"></div>
+          </div>
+        </div>
+
+        <div class="statusbar">
+          <span id="cursorPos">Ln 1, Col 1</span>
+          <span id="docVersion">v0</span>
+        </div>
+
+        <section class="console">
+          <div class="console-header">
+            <strong>Терминал / Консоль</strong>
+            <div class="console-actions">
+              <button type="button" id="checkBtn">Проверить синтаксис</button>
+              <button type="button" id="runBtn">Запустить</button>
+              <button type="button" id="stopBtn">Остановить</button>
+            </div>
+          </div>
+          <pre id="runOutput" class="console-output" title="Вывод прокручивается внутри терминала"></pre>
+        </section>
+      </section>
+
+      <aside class="sidebar">
+        <div class="sidebar-section participants-section">
+          <div class="sidebar-header">
+            <h3>Участники</h3>
+          </div>
+          <ul id="participants"></ul>
+        </div>
+
+        <div class="sidebar-section chat-section">
+          <div class="sidebar-header">
+            <h3>Чат</h3>
+            <div class="chat-header-actions">
+              <button type="button" id="chatLastOnlyBtn">Последнее</button>
+            </div>
+          </div>
+          <div id="chatBox"></div>
+          <div class="chatInput">
+            <input id="chatInput" type="text" placeholder="Сообщение..." />
+            <button type="button" id="chatSend">Отправить</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=20260509-v5"></script>
+</body>
+</html>
