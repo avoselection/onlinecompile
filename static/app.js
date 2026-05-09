@@ -18,6 +18,9 @@
     docVersion: 0,
     currentFilename: "main.py",
     applyingRemote: false,
+    patchInFlight: null,
+    queuedText: null,
+    awaitingFullSync: false,
     reconnectTimer: null,
     pingTimer: null,
     autosaveTimer: null,
@@ -29,9 +32,13 @@
     lspStatus: "local",
     participants: [],
     isRunning: false,
+    stopRequested: false,
     hasConnectedOnce: false,
     toastTimer: null,
     easterTimer: null,
+    chatMessages: [],
+    chatLastOnly: false,
+    consoleScrollFrame: null,
   };
 
   const entryScreen = document.getElementById("entryScreen");
@@ -55,6 +62,7 @@
 
   const editorTextarea = document.getElementById("editor");
   const editorMount = document.getElementById("editorMount");
+  const editorBody = document.querySelector(".editor-body");
   const gutterEl = document.getElementById("gutter");
   const remoteCursorsEl = document.getElementById("remoteCursors");
   const participantsEl = document.getElementById("participants");
@@ -67,31 +75,37 @@
   const regionEndEl = document.getElementById("regionEnd");
   const hostControls = document.getElementById("hostControls");
   const sessionInfo = document.getElementById("sessionInfo");
-  const roleInfo = document.getElementById("roleInfo");
   const roomInfo = document.getElementById("roomInfo");
   const autosaveBadge = document.getElementById("autosaveBadge");
+  const consoleActions = document.querySelector(".console-actions");
   const hostStatusBadge = document.getElementById("hostStatusBadge");
   const cursorPos = document.getElementById("cursorPos");
   const docVersionSpan = document.getElementById("docVersion");
   const currentFileSpan = document.getElementById("currentFile");
   const lspStatusEl = document.getElementById("lspStatus");
+  const editingUsersEl = document.getElementById("editingUsers");
   const chatBox = document.getElementById("chatBox");
   const chatInput = document.getElementById("chatInput");
   const chatSend = document.getElementById("chatSend");
+  const chatLastOnlyBtn = document.getElementById("chatLastOnlyBtn");
   const runBtn = document.getElementById("runBtn");
   const checkBtn = document.getElementById("checkBtn");
-  const saveBtn = document.getElementById("saveBtn");
   const stopBtn = document.getElementById("stopBtn");
   const runOutput = document.getElementById("runOutput");
   const fileSelect = document.getElementById("fileSelect");
   const createFileBtn = document.getElementById("createFileBtn");
   const importFileBtn = document.getElementById("importFileBtn");
   const downloadFileBtn = document.getElementById("downloadFileBtn");
+  const downloadAllBtn = document.getElementById("downloadAllBtn");
   const importFileInput = document.getElementById("importFileInput");
   const blameReportBtn = document.getElementById("blameReportBtn");
   const scoreReportBtn = document.getElementById("scoreReportBtn");
   const connectionBadge = document.getElementById("connectionBadge");
-  const themeBtns = document.querySelectorAll(".theme-btn");
+  const themeSelect = document.getElementById("themeSelect");
+
+  const MAX_CLIENT_DOCUMENT_BYTES = 1024 * 1024;
+  const MAX_CONSOLE_CHARS = 120000;
+  const MAX_CHAT_MESSAGES = 300;
 
   function toast(message) {
     if (!toastEl) {
@@ -102,6 +116,15 @@
     toastEl.classList.add("is-visible");
     clearTimeout(state.toastTimer);
     state.toastTimer = window.setTimeout(() => toastEl.classList.remove("is-visible"), 2600);
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
   }
 
   function loadScript(src) {
@@ -220,7 +243,8 @@
   function setLspStatus(text, kind = "idle") {
     state.lspStatus = text;
     lspStatusEl.textContent = text;
-    lspStatusEl.parentElement.dataset.state = kind;
+    const badge = lspStatusEl.classList.contains("info-chip") ? lspStatusEl : lspStatusEl.closest(".info-chip");
+    if (badge) badge.dataset.state = kind;
   }
 
   function showAuthError(message = "") {
@@ -240,11 +264,18 @@
   }
 
   function syncRoleVisibility() {
+    const isHost = state.role === "host";
+    document.body.dataset.role = state.role;
     roleCards.forEach((button) => button.classList.toggle("active", button.dataset.role === state.role));
-    hostPane.hidden = state.role !== "host";
-    studentPane.hidden = state.role !== "student";
+    hostPane.hidden = !isHost;
+    studentPane.hidden = isHost;
     hostModeBtns.forEach((button) => button.classList.toggle("active", button.dataset.mode === state.roomAction));
-    hostControls.style.display = state.role === "host" ? "flex" : "none";
+    hostControls.style.display = "flex";
+    hostControls.querySelectorAll(".host-only").forEach((element) => {
+      element.hidden = !isHost;
+    });
+    if (consoleActions) consoleActions.hidden = !isHost;
+    if (autosaveBadge) autosaveBadge.hidden = !isHost;
   }
 
   function setRole(role) {
@@ -304,27 +335,23 @@
     showEntryScreen(false);
     setReadOnly(true);
     clearConsole();
+    clearChat();
     appendConsole(`[system] Подготовка подключения\n`);
     connect();
   }
 
   function applyTheme(theme) {
-    const safeTheme = ["light", "dark", "system"].includes(theme) ? theme : "system";
-    document.body.classList.remove("theme-light", "theme-dark");
-    if (safeTheme === "light") {
-      document.body.classList.add("theme-light");
-    } else if (safeTheme === "dark") {
-      document.body.classList.add("theme-dark");
-    }
+    const safeTheme = ["system", "light", "dark", "avo"].includes(theme) ? theme : "system";
+    document.body.classList.remove("theme-light", "theme-dark", "theme-avo");
+    if (safeTheme !== "system") document.body.classList.add(`theme-${safeTheme}`);
     localStorage.setItem("livepy:theme", safeTheme);
-    themeBtns.forEach((btn) => btn.classList.toggle("active", btn.dataset.theme === safeTheme));
+    if (themeSelect) themeSelect.value = safeTheme;
     syncMonacoTheme();
   }
 
   function initTheme() {
-    const savedTheme = localStorage.getItem("livepy:theme") || "light";
-    applyTheme(savedTheme);
-    themeBtns.forEach((btn) => btn.addEventListener("click", () => applyTheme(btn.dataset.theme)));
+    applyTheme(localStorage.getItem("livepy:theme") || "system");
+    themeSelect?.addEventListener("change", () => applyTheme(themeSelect.value));
   }
 
   function hideEasterEgg() {
@@ -343,20 +370,23 @@
   }
 
   function initKonamiCode() {
-    const sequence = ["arrowup", "arrowup", "arrowdown", "arrowdown", "arrowleft", "arrowright", "arrowleft", "arrowright", "a", "b"];
-    let cursor = 0;
+    const sequences = [
+      ["arrowup", "arrowup", "arrowdown", "arrowdown", "arrowleft", "arrowright", "arrowleft", "arrowright", "b", "a"],
+      ["arrowup", "arrowup", "arrowdown", "arrowdown", "arrowleft", "arrowright", "arrowleft", "arrowright", "a", "b"],
+    ];
+    const cursors = sequences.map(() => 0);
 
     document.addEventListener("keydown", (event) => {
       const key = String(event.key || "").toLowerCase();
-      if (key === sequence[cursor]) {
-        cursor += 1;
+      sequences.forEach((sequence, index) => {
+        let cursor = cursors[index];
+        cursor = key === sequence[cursor] ? cursor + 1 : (key === sequence[0] ? 1 : 0);
         if (cursor === sequence.length) {
           cursor = 0;
           triggerEasterEgg();
         }
-        return;
-      }
-      cursor = key === sequence[0] ? 1 : 0;
+        cursors[index] = cursor;
+      });
     });
 
     closeEasterEggBtn?.addEventListener("click", hideEasterEgg);
@@ -365,26 +395,70 @@
     });
   }
 
+  function scrollConsoleToBottom() {
+    if (!runOutput) return;
+    if (state.consoleScrollFrame) window.cancelAnimationFrame(state.consoleScrollFrame);
+    state.consoleScrollFrame = window.requestAnimationFrame(() => {
+      runOutput.scrollTop = runOutput.scrollHeight;
+      state.consoleScrollFrame = null;
+    });
+  }
+
   function appendConsole(text) {
     runOutput.textContent += text;
-    runOutput.scrollTop = runOutput.scrollHeight;
+    if (runOutput.textContent.length > MAX_CONSOLE_CHARS) {
+      runOutput.textContent = `[console] Показаны последние ${MAX_CONSOLE_CHARS} символов вывода\n` + runOutput.textContent.slice(-MAX_CONSOLE_CHARS);
+    }
+    scrollConsoleToBottom();
   }
 
   function clearConsole() {
     runOutput.textContent = "";
   }
 
-  function appendChat(line) {
-    const item = document.createElement("div");
-    item.className = "chat-line";
-    item.textContent = line;
-    chatBox.appendChild(item);
+  function renderChat() {
+    if (!chatBox) return;
+    chatBox.innerHTML = "";
+    const messages = state.chatLastOnly ? state.chatMessages.slice(-1) : state.chatMessages;
+
+    if (!messages.length) {
+      const empty = document.createElement("div");
+      empty.className = "chat-empty";
+      empty.textContent = "Сообщений пока нет";
+      chatBox.appendChild(empty);
+    } else {
+      messages.forEach((line) => {
+        const item = document.createElement("div");
+        item.className = "chat-line";
+        item.textContent = line;
+        chatBox.appendChild(item);
+      });
+    }
+
+    chatBox.classList.toggle("is-last-only", state.chatLastOnly);
+    if (chatLastOnlyBtn) {
+      chatLastOnlyBtn.textContent = state.chatLastOnly ? "Вся история" : "Последнее";
+      chatLastOnlyBtn.classList.toggle("active", state.chatLastOnly);
+      chatLastOnlyBtn.setAttribute("aria-pressed", state.chatLastOnly ? "true" : "false");
+    }
     chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  function appendChat(line) {
+    state.chatMessages.push(String(line ?? ""));
+    if (state.chatMessages.length > MAX_CHAT_MESSAGES) {
+      state.chatMessages.splice(0, state.chatMessages.length - MAX_CHAT_MESSAGES);
+    }
+    renderChat();
+  }
+
+  function clearChat() {
+    state.chatMessages = [];
+    renderChat();
   }
 
   function updateHeaderInfo() {
     sessionInfo.textContent = `Вы: ${state.name}`;
-    roleInfo.textContent = state.role === "host" ? "Роль: ведущий" : "Роль: студент";
     roomInfo.textContent = `Комната: ${state.room || "onlinecompile"}`;
     currentFileSpan.textContent = state.currentFilename || "main.py";
   }
@@ -408,11 +482,46 @@
     currentFileSpan.textContent = current;
   }
 
+  function syncFallbackGutter() {
+    if (!gutterEl || state.monacoEditor) return;
+    gutterEl.scrollTop = editorTextarea.scrollTop;
+  }
+
   function updateGutter() {
+    if (!gutterEl) return;
     const lines = getEditorText().split("\n").length;
     const digits = String(lines).length;
     gutterEl.style.width = `${Math.max(48, digits * 12 + 20)}px`;
     gutterEl.textContent = Array.from({ length: lines }, (_, index) => String(index + 1)).join("\n");
+    syncFallbackGutter();
+  }
+
+  function colorToRgba(color, alpha = 0.22) {
+    const raw = String(color || "").trim();
+    const match = raw.match(/^#?([0-9a-f]{6})$/i);
+    if (!match) return `rgba(255, 146, 249, ${alpha})`;
+    const value = match[1];
+    const r = parseInt(value.slice(0, 2), 16);
+    const g = parseInt(value.slice(2, 4), 16);
+    const b = parseInt(value.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  function renderEditingUsers() {
+    if (!editingUsersEl) return;
+    const editors = state.participants.filter((participant) => participant.role === "student" && participant.can_edit);
+    editingUsersEl.hidden = editors.length === 0;
+    editingUsersEl.innerHTML = "";
+    editors.forEach((participant) => {
+      const badge = document.createElement("span");
+      const color = participant.color || "#ff92f9";
+      badge.className = "editing-user";
+      badge.style.background = colorToRgba(color, 0.22);
+      badge.style.borderColor = colorToRgba(color, 0.5);
+      badge.style.color = color;
+      badge.textContent = `Редактирует: ${participant.name || "Студент"}`;
+      editingUsersEl.appendChild(badge);
+    });
   }
 
   function indexToLineCol(text, idx) {
@@ -454,43 +563,45 @@
         const safeColumn = Math.max(1, Math.min(col, maxColumn));
         const position = new state.monaco.Position(safeLine, safeColumn);
         const coords = state.monacoEditor.getScrolledVisiblePosition(position);
-        if (coords) {
-          return { top: coords.top, left: coords.left };
-        }
+        return coords ? { top: coords.top, left: coords.left, height: coords.height || 18 } : null;
       } catch (error) {
         console.debug("monaco cursor coords fallback", error);
       }
     }
     return {
-      top: 14 + (line - 1) * 21,
-      left: 14 + (col - 1) * 8,
+      top: 14 + (line - 1) * 21 - editorTextarea.scrollTop,
+      left: 14 + (col - 1) * 8 - editorTextarea.scrollLeft,
+      height: 18,
     };
   }
 
   function renderRemoteCursors() {
     if (!state.me) return;
     remoteCursorsEl.innerHTML = "";
-    if (!currentClientCanEdit()) return;
     const participants = state.participants || [];
 
     participants.forEach((participant) => {
-      if (!participant.can_edit || !participant.cursor || participant.id === state.me.id) return;
-      const { top, left } = lineColToCoords(participant.cursor.line, participant.cursor.col);
+      const canShowCursor = participant.role === "host" || participant.can_edit;
+      if (!canShowCursor || !participant.cursor || participant.id === state.me.id) return;
+      const coords = lineColToCoords(participant.cursor.line, participant.cursor.col);
+      if (!coords) return;
 
+      const color = participant.color || "#ff92f9";
       const wrapper = document.createElement("div");
       wrapper.className = "remote-cursor";
-      wrapper.style.top = `${top}px`;
-      wrapper.style.left = `${left}px`;
+      wrapper.style.top = `${coords.top}px`;
+      wrapper.style.left = `${coords.left}px`;
 
       const caret = document.createElement("div");
       caret.className = "remote-caret";
-      caret.style.background = participant.color;
-      caret.style.height = "18px";
+      caret.style.background = color;
+      caret.style.height = `${coords.height || 18}px`;
 
       const label = document.createElement("div");
       label.className = "remote-cursor-label";
-      label.style.background = participant.color;
-      label.textContent = participant.name;
+      label.style.background = colorToRgba(color, 0.74);
+      label.style.borderColor = colorToRgba(color, 0.9);
+      label.textContent = `Редактирует: ${participant.name || "Участник"}`;
 
       wrapper.appendChild(caret);
       wrapper.appendChild(label);
@@ -500,15 +611,17 @@
 
   function updateButtons(canEdit) {
     setReadOnly(!canEdit);
+    stopBtn.textContent = state.stopRequested ? "Остановка…" : "Остановить";
+    if (downloadFileBtn) downloadFileBtn.disabled = false;
 
     if (state.role === "host") {
       runBtn.disabled = state.isRunning;
       checkBtn.disabled = state.isRunning;
-      saveBtn.disabled = false;
-      stopBtn.disabled = !state.isRunning;
+      stopBtn.disabled = !state.isRunning || state.stopRequested;
       fileSelect.disabled = false;
       createFileBtn.disabled = false;
       importFileBtn.disabled = false;
+      if (downloadAllBtn) downloadAllBtn.disabled = false;
       blameReportBtn.disabled = false;
       scoreReportBtn.disabled = false;
       return;
@@ -516,11 +629,11 @@
 
     runBtn.disabled = true;
     checkBtn.disabled = true;
-    saveBtn.disabled = true;
     stopBtn.disabled = true;
     fileSelect.disabled = true;
     createFileBtn.disabled = true;
     importFileBtn.disabled = true;
+    if (downloadAllBtn) downloadAllBtn.disabled = true;
     blameReportBtn.disabled = true;
     scoreReportBtn.disabled = true;
   }
@@ -528,7 +641,7 @@
   function renderParticipants(list) {
     state.participants = (list || []).map((item) => ({
       ...item,
-      cursor: state.participants?.find((p) => p.id === item.id)?.cursor || null,
+      cursor: item.cursor || state.participants?.find((p) => p.id === item.id)?.cursor || null,
     }));
 
     participantsEl.innerHTML = "";
@@ -536,22 +649,30 @@
 
     state.participants.forEach((participant) => {
       const row = document.createElement("li");
+      const isStudent = participant.role === "student";
+      const roleLabel = isStudent ? "студент" : "ведущий";
+      const latencyLabel = participant.latency_ms != null ? `${participant.latency_ms} ms` : "— ms";
+      const details = isStudent
+        ? [`${participant.can_edit ? "редактор" : "просмотр"}`, `доступов: ${participant.access_grants ?? 0}`]
+        : [];
+
+      if (isStudent && participant.region) details.push(`строки ${participant.region[0]}-${participant.region[1]}`);
+
       row.className = "participant-item";
-      const roleLabel = participant.role === "host" ? "ведущий" : `студент · ${participant.can_edit ? "ред." : "просмотр"}`;
-      const metricsLabel = participant.role === "host"
-        ? `${participant.latency_ms != null ? `Задержка: ${participant.latency_ms} ms` : ""}`
-        : `Выдач доступа: ${participant.access_grants ?? 0}${participant.latency_ms != null ? ` · ${participant.latency_ms} ms` : ""}`;
       row.innerHTML = `
-        <span class="participant-color" style="background:${participant.color}"></span>
+        <span class="participant-color" style="background:${participant.color || "var(--accent)"}"></span>
         <div class="participant-meta">
-          <strong>${participant.name}</strong>
-          <span>${roleLabel}${participant.region ? ` · строки ${participant.region[0]}-${participant.region[1]}` : ""}</span>
-          ${metricsLabel ? `<span>${metricsLabel}</span>` : ""}
+          <strong class="participant-name">${escapeHtml(participant.name)}</strong>
+          <div class="participant-line">
+            <span class="participant-tag">роль: ${escapeHtml(roleLabel)}</span>
+            <span class="participant-tag">${escapeHtml(latencyLabel)}</span>
+          </div>
+          ${details.length ? `<div class="participant-details">${details.map((detail) => `<span class="participant-tag">${escapeHtml(detail)}</span>`).join("")}</div>` : ""}
         </div>
       `;
       participantsEl.appendChild(row);
 
-      if (participant.role === "student") {
+      if (isStudent) {
         const option = document.createElement("option");
         option.value = participant.id;
         option.textContent = `${participant.name} (${participant.access_grants ?? 0} выдач)`;
@@ -561,8 +682,89 @@
 
     const meInfo = state.participants.find((participant) => participant.id === state.me?.id);
     if (meInfo) state.me = { ...state.me, can_edit: Boolean(meInfo.can_edit) };
-    updateButtons(Boolean(meInfo?.can_edit));
+    renderEditingUsers();
+    updateButtons(currentClientCanEdit());
     renderRemoteCursors();
+  }
+
+  function setDocVersionLabel(suffix = "") {
+    docVersionSpan.textContent = `v${state.docVersion}${suffix}`;
+  }
+
+  function hasPendingLocalEdit() {
+    return Boolean(state.patchInFlight) || state.queuedText !== null;
+  }
+
+  function resetPendingSync() {
+    state.patchInFlight = null;
+    state.queuedText = null;
+    state.awaitingFullSync = false;
+  }
+
+  function flushDocumentPatch() {
+    if (state.applyingRemote || state.awaitingFullSync || state.patchInFlight) return;
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    if (!currentClientCanEdit()) return;
+    if (state.queuedText === null) return;
+
+    const nextText = String(state.queuedText ?? "");
+    if (nextText === state.docText) {
+      state.queuedText = null;
+      setDocVersionLabel();
+      return;
+    }
+
+    const patch = computePatch(state.docText, nextText);
+    if (patch.start === 0 && patch.end === 0 && patch.text === "") {
+      state.queuedText = null;
+      setDocVersionLabel();
+      return;
+    }
+
+    state.patchInFlight = {
+      baseVersion: state.docVersion,
+      text: nextText,
+      patch,
+    };
+    state.queuedText = null;
+
+    try {
+      state.ws.send(JSON.stringify({
+        type: "patch",
+        baseVersion: state.docVersion,
+        start: patch.start,
+        end: patch.end,
+        text: patch.text,
+      }));
+      setDocVersionLabel(" •");
+    } catch (error) {
+      console.warn("patch send failed", error);
+      state.patchInFlight = null;
+      state.queuedText = nextText;
+      setDocVersionLabel(" ⟳");
+    }
+  }
+
+  function sendDocumentPatch(nextText) {
+    if (state.applyingRemote || state.awaitingFullSync) return;
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    if (!currentClientCanEdit()) return;
+
+    const safeText = String(nextText ?? "");
+    state.queuedText = safeText;
+    flushDocumentPatch();
+  }
+
+  function confirmOwnPatch(version) {
+    state.docVersion = Number(version) || state.docVersion;
+    if (state.patchInFlight) {
+      state.docText = state.patchInFlight.text;
+      state.patchInFlight = null;
+    } else {
+      state.docText = getEditorText();
+    }
+    setDocVersionLabel(state.queuedText !== null ? " •" : "");
+    flushDocumentPatch();
   }
 
   function computePatch(oldText, newText) {
@@ -584,28 +786,64 @@
 
   function applyRemotePatch(patch) {
     const currentText = getEditorText();
-    const nextText = currentText.slice(0, patch.start) + patch.text + currentText.slice(patch.end);
-    state.applyingRemote = true;
-
-    if (state.monacoEditor && state.monacoModel) {
-      const startPos = state.monacoModel.getPositionAt(patch.start);
-      const endPos = state.monacoModel.getPositionAt(patch.end);
-      state.monacoEditor.executeEdits("remote-sync", [{
-        range: new state.monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column),
-        text: patch.text,
-        forceMoveMarkers: true,
-      }]);
-    } else {
-      setEditorText(nextText);
+    if (!patch || patch.start < 0 || patch.end < patch.start || patch.end > currentText.length) {
+      requestFull();
+      return false;
     }
 
-    state.applyingRemote = false;
+    const insertText = String(patch.text ?? "");
+    const nextText = currentText.slice(0, patch.start) + insertText + currentText.slice(patch.end);
+    state.applyingRemote = true;
+
+    try {
+      if (state.monacoModel && state.monaco) {
+        const startPos = state.monacoModel.getPositionAt(patch.start);
+        const endPos = state.monacoModel.getPositionAt(patch.end);
+        const scrollTop = state.monacoEditor?.getScrollTop?.();
+        const scrollLeft = state.monacoEditor?.getScrollLeft?.();
+        state.monacoModel.applyEdits([{
+          range: new state.monaco.Range(startPos.lineNumber, startPos.column, endPos.lineNumber, endPos.column),
+          text: insertText,
+          forceMoveMarkers: true,
+        }]);
+
+        // Monaco can ignore editor-driven edits while the viewer is read-only on some devices.
+        // The model-level edit above normally bypasses that; this final equality check makes
+        // deletion/insertion sync deterministic and falls back to the exact expected document.
+        if (state.monacoModel.getValue() !== nextText) {
+          state.monacoModel.setValue(nextText);
+        }
+        if (scrollTop != null) state.monacoEditor?.setScrollTop?.(scrollTop);
+        if (scrollLeft != null) state.monacoEditor?.setScrollLeft?.(scrollLeft);
+      } else {
+        setEditorText(nextText);
+      }
+    } catch (error) {
+      console.warn("remote patch failed, requesting full sync", error);
+      setEditorText(nextText);
+    } finally {
+      state.applyingRemote = false;
+    }
+
+    const appliedText = getEditorText();
+    if (appliedText !== nextText) {
+      requestFull();
+      return false;
+    }
+
+    editorTextarea.value = nextText;
     state.docText = nextText;
     updateGutter();
     updateCursorStatus();
+    renderRemoteCursors();
+    return true;
   }
 
   function requestFull() {
+    state.awaitingFullSync = true;
+    state.patchInFlight = null;
+    state.queuedText = null;
+    setDocVersionLabel(" ⟳");
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       state.ws.send(JSON.stringify({ type: "request_full" }));
     }
@@ -634,10 +872,7 @@
 
   function startAutosaveLoop() {
     clearInterval(state.autosaveTimer);
-    if (state.role !== "host") {
-      setAutosaveBadge("Автосохранение: через сервер", "idle");
-      return;
-    }
+    if (state.role !== "host") return;
     setAutosaveBadge("Автосохранение: активно", "ok");
     state.autosaveTimer = setInterval(() => {
       if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
@@ -795,11 +1030,11 @@ except Exception as error:
         model: state.monacoModel,
         automaticLayout: true,
         minimap: { enabled: false },
-        lineNumbers: "off",
+        lineNumbers: "on",
         glyphMargin: false,
         folding: false,
-        lineDecorationsWidth: 0,
-        lineNumbersMinChars: 0,
+        lineDecorationsWidth: 6,
+        lineNumbersMinChars: 3,
         overviewRulerLanes: 0,
         hideCursorInOverviewRuler: true,
         scrollBeyondLastLine: false,
@@ -825,24 +1060,7 @@ except Exception as error:
         updateGutter();
         updateCursorStatus();
         renderRemoteCursors();
-
-        if (state.applyingRemote) return;
-        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-
-        const patch = computePatch(state.docText, text);
-        if (patch.start === 0 && patch.end === 0 && patch.text === "") return;
-
-        state.ws.send(JSON.stringify({
-          type: "patch",
-          baseVersion: state.docVersion,
-          start: patch.start,
-          end: patch.end,
-          text: patch.text,
-        }));
-
-        state.docText = text;
-        state.docVersion += 1;
-        docVersionSpan.textContent = `v${state.docVersion}`;
+        sendDocumentPatch(text);
       });
 
       state.monacoEditor.onDidChangeCursorSelection(() => {
@@ -852,15 +1070,18 @@ except Exception as error:
       state.monacoEditor.onDidScrollChange(() => renderRemoteCursors());
 
       editorMount.classList.add("is-active");
+      editorBody?.classList.add("monaco-active");
       editorMount.style.display = "block";
+      window.requestAnimationFrame(() => state.monacoEditor?.layout());
       editorTextarea.style.display = "none";
-      setLspStatus("Monaco Editor: подсветка и локальные подсказки активны", "ok");
+      setLspStatus("Monaco Editor", "ok");
       updateGutter();
       updateCursorStatus();
       renderRemoteCursors();
     } catch (error) {
       console.warn("Monaco unavailable, fallback to textarea.", error);
-      setLspStatus("Monaco недоступен, включён текстовый режим", "error");
+      setLspStatus("Текстовый режим", "error");
+      editorBody?.classList.remove("monaco-active");
       editorTextarea.style.display = "block";
       editorMount.style.display = "none";
     }
@@ -885,8 +1106,9 @@ except Exception as error:
         state.me = msg.you;
         state.room = msg.room || state.room;
         state.docText = msg.doc.text || "";
-        state.docVersion = msg.doc.version || 0;
+        state.docVersion = Number(msg.doc.version) || 0;
         state.currentFilename = msg.filename || "main.py";
+        resetPendingSync();
 
         state.applyingRemote = true;
         setEditorText(state.docText);
@@ -900,9 +1122,10 @@ except Exception as error:
         renderParticipants(msg.participants || []);
         updateGutter();
         updateCursorStatus();
-        docVersionSpan.textContent = `v${state.docVersion}`;
+        setDocVersionLabel();
         setConnectionBadge("Подключено", "ok");
         setHostStatusBadge("Ведущий: онлайн", "ok");
+        startAutosaveLoop();
         appendConsole(`[room] Подключено к комнате ${state.room}\n`);
         window.history.replaceState({}, "", "/onlinecompile");
         focusEditor();
@@ -912,43 +1135,55 @@ except Exception as error:
         renderParticipants(msg.participants || []);
         break;
 
-      case "doc_update":
+      case "doc_update": {
+        const incomingVersion = Number(msg.version) || state.docVersion;
         if (msg.by_id === state.me?.id) {
-          state.docVersion = msg.version;
-          docVersionSpan.textContent = `v${state.docVersion}`;
+          confirmOwnPatch(incomingVersion);
           break;
         }
-        applyRemotePatch(msg.patch);
-        state.docVersion = msg.version;
-        docVersionSpan.textContent = `v${state.docVersion}`;
+        if (state.awaitingFullSync || hasPendingLocalEdit() || incomingVersion !== state.docVersion + 1) {
+          requestFull();
+          break;
+        }
+        if (applyRemotePatch(msg.patch)) {
+          state.docVersion = incomingVersion;
+          setDocVersionLabel();
+        }
         break;
+      }
 
       case "doc_full":
         state.docText = msg.doc.text || "";
-        state.docVersion = msg.doc.version || state.docVersion;
+        state.docVersion = Number(msg.doc.version) || state.docVersion;
         state.currentFilename = msg.filename || state.currentFilename;
+        resetPendingSync();
         state.applyingRemote = true;
         setEditorText(state.docText);
         state.applyingRemote = false;
         updateGutter();
         updateCursorStatus();
         currentFileSpan.textContent = state.currentFilename;
-        docVersionSpan.textContent = `v${state.docVersion}`;
+        setDocVersionLabel();
+        renderRemoteCursors();
         break;
 
       case "cursor": {
         const target = state.participants.find((item) => item.id === msg.id);
-        if (target && target.can_edit) {
+        if (target && (target.role === "host" || target.can_edit)) {
           target.cursor = { line: msg.line, col: msg.col };
         }
         renderRemoteCursors();
         break;
       }
 
-      case "error":
-        appendConsole(`[error] ${msg.message}\n`);
-        requestFull();
+      case "error": {
+        const message = String(msg.message || "");
+        appendConsole(`[error] ${message}\n`);
+        if (/верс|патч|границ|документ|редактирован|диапазон/i.test(message)) {
+          requestFull();
+        }
         break;
+      }
 
       case "chat":
         appendChat(`${msg.from}: ${msg.text}`);
@@ -958,27 +1193,33 @@ except Exception as error:
         appendConsole(msg.ok ? "[syntax] OK\n" : `[syntax] ${msg.error}\n`);
         break;
 
-      case "run_state":
+      case "run_state": {
         state.isRunning = Boolean(msg.running);
+        state.stopRequested = false;
         updateButtons(currentClientCanEdit());
         if (msg.clear) clearConsole();
-        appendConsole(msg.running ? `[run] Запуск ${msg.filename}
-` : `[run] Завершено
-`);
+        appendConsole(msg.running ? `[run] Запуск ${msg.filename}\n` : "[run] Завершено\n");
         break;
+      }
 
       case "run_output":
         appendConsole(msg.text || "");
         break;
 
       case "run_result":
-        appendConsole(`\n[exit] code=${msg.returncode ?? "none"} | timeout=${msg.timeout ? "yes" : "no"} | ${msg.elapsed_ms} ms\n`);
+        appendConsole(`\n[exit] code=${msg.returncode ?? "none"} | timeout=${msg.timeout ? "yes" : "no"} | stopped=${msg.stopped ? "yes" : "no"} | ${msg.elapsed_ms} ms\n`);
         break;
 
-      case "save_result":
-        setAutosaveBadge(msg.ok ? `Автосохранение: ${msg.filename}` : "Автосохранение: ошибка", msg.ok ? "ok" : "error");
-        appendConsole(msg.ok ? `[save] ${msg.filename}\n` : `[save-error] ${msg.error}\n`);
+      case "save_result": {
+        const isStudentFile = msg.scope === "student_file";
+        const okText = isStudentFile ? `личная копия: ${msg.filename}` : (msg.filename || state.currentFilename);
+        const errorText = msg.error || "Ошибка сохранения";
+        if (state.role === "host") {
+          setAutosaveBadge(msg.ok ? `Сохранено: ${okText}` : "Сохранение: ошибка", msg.ok ? "ok" : "error");
+        }
+        appendConsole(msg.ok ? `[save] ${okText}\n` : `[save-error] ${errorText}\n`);
         break;
+      }
 
       case "files":
         updateFileList(msg.files || [], msg.current || state.currentFilename);
@@ -1008,8 +1249,7 @@ except Exception as error:
       case "room_closed":
         state.isRunning = false;
         updateButtons(currentClientCanEdit());
-        appendConsole(`[room] ${msg.message}
-`);
+        appendConsole(`[room] ${msg.message}\n`);
         toast(msg.message || "Комната закрыта.");
         state.manualClose = true;
         stopPingLoop();
@@ -1044,7 +1284,6 @@ except Exception as error:
         room_action: state.roomAction,
       }));
       startPingLoop();
-      startAutosaveLoop();
     };
 
     state.ws.onmessage = (event) => {
@@ -1056,6 +1295,7 @@ except Exception as error:
       stopPingLoop();
       stopAutosaveLoop();
       state.isRunning = false;
+      state.stopRequested = false;
       updateButtons(currentClientCanEdit());
       if (state.manualClose) return;
       setConnectionBadge("Переподключение…", "idle");
@@ -1074,28 +1314,15 @@ except Exception as error:
     editorTextarea.addEventListener("input", () => {
       updateGutter();
       updateCursorStatus();
-
-      if (state.applyingRemote) return;
-      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-
-      const newText = editorTextarea.value;
-      const patch = computePatch(state.docText, newText);
-
-      state.ws.send(JSON.stringify({
-        type: "patch",
-        baseVersion: state.docVersion,
-        start: patch.start,
-        end: patch.end,
-        text: patch.text,
-      }));
-
-      state.docText = newText;
-      state.docVersion += 1;
-      docVersionSpan.textContent = `v${state.docVersion}`;
+      sendDocumentPatch(editorTextarea.value);
     });
 
     ["keyup", "click", "select"].forEach((eventName) => {
       editorTextarea.addEventListener(eventName, updateCursorStatus);
+    });
+    editorTextarea.addEventListener("scroll", () => {
+      syncFallbackGutter();
+      renderRemoteCursors();
     });
 
     editorTextarea.addEventListener("keydown", (event) => {
@@ -1113,6 +1340,97 @@ except Exception as error:
 
   function openReport(url) {
     window.open(url, "_blank", "noopener");
+  }
+
+  function normalizeDownloadFilename(filename) {
+    const raw = String(filename || "main.py").trim().replace(/[\\/]+/g, "_");
+    const cleaned = raw.replace(/[^A-Za-z0-9А-Яа-яЁё._ -]/g, "_").replace(/\s+/g, "_").replace(/^\.+/, "") || "main.py";
+    return cleaned.toLowerCase().endsWith(".py") ? cleaned : `${cleaned}.py`;
+  }
+
+  function normalizeArchiveFilename(filename) {
+    const raw = String(filename || "onlinecompile_files.zip").trim().replace(/[\\/]+/g, "_");
+    const cleaned = raw.replace(/[^A-Za-z0-9А-Яа-яЁё._ -]/g, "_").replace(/\s+/g, "_").replace(/^\.+/, "") || "onlinecompile_files.zip";
+    return cleaned.toLowerCase().endsWith(".zip") ? cleaned : `${cleaned}.zip`;
+  }
+
+  function getDownloadFrame() {
+    let frame = document.getElementById("downloadFrame");
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.id = "downloadFrame";
+      frame.name = "downloadFrame";
+      frame.title = "download";
+      frame.setAttribute("aria-hidden", "true");
+      Object.assign(frame.style, {
+        position: "fixed",
+        left: "-10000px",
+        top: "0",
+        width: "1px",
+        height: "1px",
+        border: "0",
+        opacity: "0",
+        pointerEvents: "none",
+      });
+      document.body.appendChild(frame);
+    }
+    return frame;
+  }
+
+  function submitDownloadForm(filename, text) {
+    const safeFilename = normalizeDownloadFilename(filename);
+    const frame = getDownloadFrame();
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/download-text";
+    form.target = frame.name;
+    form.acceptCharset = "UTF-8";
+    Object.assign(form.style, {
+      position: "fixed",
+      left: "-10000px",
+      top: "0",
+      width: "1px",
+      height: "1px",
+      overflow: "hidden",
+    });
+
+    const filenameInput = document.createElement("input");
+    filenameInput.type = "hidden";
+    filenameInput.name = "filename";
+    filenameInput.value = safeFilename;
+
+    const contentInput = document.createElement("textarea");
+    contentInput.name = "content";
+    contentInput.value = String(text ?? "");
+
+    form.append(filenameInput, contentInput);
+    document.body.appendChild(form);
+    form.submit();
+    window.setTimeout(() => form.remove(), 60000);
+    toast(`Скачивание начато: ${safeFilename}`);
+  }
+
+  function downloadUrlThroughBrowser(url) {
+    const frame = getDownloadFrame();
+    const link = document.createElement("a");
+    link.href = `${url}${url.includes("?") ? "&" : "?"}_=${Date.now()}`;
+    link.target = frame.name;
+    link.rel = "noopener";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    window.setTimeout(() => link.remove(), 60000);
+  }
+
+  function downloadCurrentEditorFile() {
+    submitDownloadForm(state.currentFilename || "main.py", getEditorText());
+  }
+
+  function downloadRoomArchive() {
+    if (!state.room) return;
+    const filename = normalizeArchiveFilename(`${state.room || "onlinecompile"}_files.zip`);
+    downloadUrlThroughBrowser(`/api/rooms/${encodeURIComponent(state.room)}/download-all`);
+    toast(`Скачивание начато: ${filename}`);
   }
 
   function bindEntryEvents() {
@@ -1184,8 +1502,17 @@ except Exception as error:
 
     chatSend.addEventListener("click", sendChat);
     chatInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") sendChat();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        sendChat();
+      }
     });
+
+    chatLastOnlyBtn?.addEventListener("click", () => {
+      state.chatLastOnly = !state.chatLastOnly;
+      renderChat();
+    });
+    renderChat();
 
     runBtn.addEventListener("click", () => {
       state.ws?.send(JSON.stringify({ type: "run_code", code: getEditorText(), timeout: 5 }));
@@ -1195,14 +1522,12 @@ except Exception as error:
       state.ws?.send(JSON.stringify({ type: "check_syntax", code: getEditorText() }));
     });
 
-    saveBtn.addEventListener("click", () => {
-      const filename = prompt("Имя файла (.py):", state.currentFilename || "main.py");
-      if (!filename) return;
-      state.ws?.send(JSON.stringify({ type: "save_py", filename, code: getEditorText() }));
-    });
 
     stopBtn.addEventListener("click", () => {
-      if (!state.isRunning) return;
+      if (!state.isRunning || state.stopRequested) return;
+      state.stopRequested = true;
+      updateButtons(currentClientCanEdit());
+      appendConsole("[run] Запрошена остановка...\n");
       state.ws?.send(JSON.stringify({ type: "stop_code" }));
     });
 
@@ -1222,12 +1547,21 @@ except Exception as error:
       const file = event.target?.files?.[0];
       if (!file) return;
       try {
+        if (file.size > MAX_CLIENT_DOCUMENT_BYTES) {
+          toast("Файл больше 1 МБ — импорт отменён");
+          return;
+        }
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+          toast("Нет подключения к комнате");
+          return;
+        }
         const content = await file.text();
         state.ws?.send(JSON.stringify({
           type: "import_file_content",
           filename: file.name || state.currentFilename || "main.py",
           content,
         }));
+        toast(`Импортирован файл: ${file.name || "main.py"}`);
       } catch (error) {
         toast(`Не удалось прочитать файл: ${error?.message || error}`);
       } finally {
@@ -1235,11 +1569,8 @@ except Exception as error:
       }
     });
 
-    downloadFileBtn?.addEventListener("click", () => {
-      if (!state.room) return;
-      const url = `/api/rooms/${encodeURIComponent(state.room)}/download?filename=${encodeURIComponent(state.currentFilename || "main.py")}`;
-      window.open(url, "_blank", "noopener");
-    });
+    downloadFileBtn?.addEventListener("click", downloadCurrentEditorFile);
+    downloadAllBtn?.addEventListener("click", downloadRoomArchive);
 
     fileSelect.addEventListener("change", () => {
       if (!fileSelect.value) return;
@@ -1263,6 +1594,7 @@ except Exception as error:
     showWorkspace(false);
     showEntryScreen(true);
     setReadOnly(true);
+    renderChat();
 
     bindFallbackEvents();
     bindEntryEvents();

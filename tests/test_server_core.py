@@ -1,3 +1,5 @@
+import asyncio
+
 import json
 
 import pytest
@@ -69,3 +71,55 @@ async def test_patch_size_limit_is_enforced():
     ok, error = await session.apply_patch(host.id, session.version, 0, 0, "x" * (server.MAX_DOCUMENT_BYTES + 1))
     assert not ok
     assert "1 МБ" in error
+
+
+@pytest.mark.asyncio
+async def test_stop_running_code_terminates_active_process(tmp_path):
+    session = server.Session("stop-demo")
+    host = server.Client(ws=DummyWebSocket(), name="Host", role="host", color="#000", can_edit=True)
+    session.clients[host.id] = host
+
+    session.run_task = asyncio.create_task(
+        server.run_python_streaming(session, "import time\nwhile True:\n    time.sleep(0.1)\n", 30)
+    )
+
+    for _ in range(50):
+        if session.running_process is not None:
+            break
+        await asyncio.sleep(0.05)
+
+    assert session.running_process is not None
+    assert await session.stop_running_code() is True
+    await asyncio.wait_for(session.run_task or asyncio.sleep(0), timeout=3)
+
+    run_results = [message for message in host.ws.messages if message.get("type") == "run_result"]
+    assert any(message.get("stopped") is True for message in run_results)
+    assert session.running_process is None
+
+
+@pytest.mark.asyncio
+async def test_host_delete_patch_restores_prior_text_and_broadcasts_deletion():
+    session = server.Session("delete-demo")
+    host = server.Client(ws=DummyWebSocket(), name="Host", role="host", color="#000", can_edit=True)
+    student = server.Client(ws=DummyWebSocket(), name="Student", role="student", color="#111")
+    session.clients[host.id] = host
+    session.clients[student.id] = student
+
+    original_text = session.doc_text
+    inserted = "temporary line\n"
+
+    ok, error = await session.apply_patch(host.id, session.version, 0, 0, inserted)
+    assert ok, error
+    version_after_insert = session.version
+    assert session.doc_text.startswith(inserted)
+
+    ok, error = await session.apply_patch(host.id, version_after_insert, 0, len(inserted), "")
+    assert ok, error
+    assert session.doc_text == original_text
+
+    deletion_updates = [
+        message for message in student.ws.messages
+        if message.get("type") == "doc_update" and message.get("version") == version_after_insert + 1
+    ]
+    assert deletion_updates
+    assert deletion_updates[-1]["patch"] == {"start": 0, "end": len(inserted), "text": ""}

@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>onlinecompile</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260509-v5" />
 </head>
-<body class="theme-light app-locked">
+<body class="app-locked">
   <section id="entryScreen" class="entry-screen">
     <div class="entry-card">
       <div class="entry-brand">
@@ -94,40 +94,60 @@
   <div class="layout" id="appLayout" hidden>
     <header class="topbar">
       <div class="topbar-left">
-        <h1>onlinecompile</h1>
+        <div class="brand-title">
+          <h1>onlinecompile</h1>
+          <span id="roomInfo" class="room-subtitle">Комната: —</span>
+        </div>
         <span id="sessionInfo" class="info-chip">Вы: —</span>
-        <span id="roleInfo" class="info-chip">Роль: —</span>
-        <span id="roomInfo" class="info-chip">Комната: —</span>
         <span id="connectionBadge" class="info-chip" data-state="idle">Не подключено</span>
         <span id="autosaveBadge" class="info-chip">Автосохранение: ожидание</span>
         <span id="hostStatusBadge" class="info-chip">Ведущий: онлайн</span>
       </div>
 
       <div class="topbar-right">
-        <div class="theme-switcher">
-          <button type="button" class="theme-btn" data-theme="light">Светлая</button>
-          <button type="button" class="theme-btn" data-theme="dark">Тёмная</button>
-          <button type="button" class="theme-btn" data-theme="system">Системная</button>
-        </div>
+        <label class="theme-switcher" for="themeSelect">
+          <span>Тема</span>
+          <select id="themeSelect" aria-label="Тема оформления">
+            <option value="system" selected>Системная</option>
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+            <option value="avo">Avo</option>
+          </select>
+        </label>
       </div>
     </header>
 
-    <div id="hostControls">
-      <select id="fileSelect" title="Текущий файл"></select>
-      <button type="button" id="createFileBtn">Новый файл</button>
-      <button type="button" id="importFileBtn">Импорт</button>
-      <button type="button" id="downloadFileBtn">Скачать код</button>
-      <input id="importFileInput" type="file" accept=".py,.txt,text/plain" hidden />
+    <div id="hostControls" class="teacher-toolbar">
+      <div class="tool-group tool-group-files" aria-label="Файлы">
+        <span class="tool-group-label">Файлы</span>
+        <select id="fileSelect" title="Текущий файл"></select>
+        <button type="button" id="createFileBtn" class="host-only">Новый</button>
+        <button type="button" id="importFileBtn" class="host-only">Импорт</button>
+        <button type="button" id="downloadFileBtn">Скачать</button>
+        <button type="button" id="downloadAllBtn" class="host-only">Скачать всё</button>
+        <input id="importFileInput" type="file" accept=".py,.txt,text/plain" hidden />
+      </div>
 
-      <select id="participantSelect" title="Студент"></select>
-      <input id="regionStart" type="number" min="1" placeholder="Старт" />
-      <input id="regionEnd" type="number" min="1" placeholder="Конец" />
-      <button type="button" id="setRegionBtn">Диапазон</button>
-      <button type="button" id="clearRegionBtn">Сбросить диапазон</button>
-      <button type="button" id="grantBtn">Выдать доступ</button>
-      <button type="button" id="revokeBtn">Забрать доступ</button>
-      <button type="button" id="blameReportBtn">Открыть Blame-отчёт</button>
-      <button type="button" id="scoreReportBtn">Открыть отчёт по доступам</button>
+      <div class="tool-group tool-group-access host-only" aria-label="Доступы">
+        <span class="tool-group-label">Доступ</span>
+        <select id="participantSelect" title="Студент"></select>
+        <button type="button" id="grantBtn">Выдать</button>
+        <button type="button" id="revokeBtn">Забрать</button>
+      </div>
+
+      <div class="tool-group tool-group-ranges host-only" aria-label="Диапазоны строк">
+        <span class="tool-group-label">Строки</span>
+        <input id="regionStart" type="number" min="1" placeholder="От" />
+        <input id="regionEnd" type="number" min="1" placeholder="До" />
+        <button type="button" id="setRegionBtn">Диапазон</button>
+        <button type="button" id="clearRegionBtn">Сброс</button>
+      </div>
+
+      <div class="tool-group tool-group-reports host-only" aria-label="Отчёты">
+        <span class="tool-group-label">Отчёты</span>
+        <button type="button" id="blameReportBtn">Blame</button>
+        <button type="button" id="scoreReportBtn">Доступы</button>
+      </div>
     </div>
 
     <main>
@@ -135,7 +155,8 @@
         <div class="editor-toolbar">
           <div class="editor-meta">
             <span class="info-chip">Файл: <strong id="currentFile">main.py</strong></span>
-            <span class="info-chip">Подсказки: <strong id="lspStatus">инициализация</strong></span>
+            <span id="lspStatus" class="info-chip">Monaco Editor</span>
+            <span id="editingUsers" class="editing-users" hidden></span>
           </div>
         </div>
 
@@ -161,38 +182,37 @@
               <button type="button" id="checkBtn">Проверить синтаксис</button>
               <button type="button" id="runBtn">Запустить</button>
               <button type="button" id="stopBtn">Остановить</button>
-              <button type="button" id="saveBtn">Сохранить</button>
             </div>
           </div>
-          <pre id="runOutput" class="console-output" title="Окно можно растягивать по высоте"></pre>
+          <pre id="runOutput" class="console-output" title="Вывод прокручивается внутри терминала"></pre>
         </section>
       </section>
 
       <aside class="sidebar">
-        <div class="sidebar-section">
+        <div class="sidebar-section participants-section">
           <div class="sidebar-header">
             <h3>Участники</h3>
           </div>
           <ul id="participants"></ul>
         </div>
 
-        <div class="sidebar-section">
+        <div class="sidebar-section chat-section">
           <div class="sidebar-header">
             <h3>Чат</h3>
+            <div class="chat-header-actions">
+              <button type="button" id="chatLastOnlyBtn">Последнее</button>
+            </div>
           </div>
           <div id="chatBox"></div>
           <div class="chatInput">
-            <input id="chatInput" type="text" placeholder="Введите сообщение..." />
+            <input id="chatInput" type="text" placeholder="Сообщение..." />
             <button type="button" id="chatSend">Отправить</button>
-          </div>
-          <div class="run-controls">
-            <button type="button" disabled>Терминал виден всем</button>
           </div>
         </div>
       </aside>
     </main>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260509-v5"></script>
 </body>
 </html>

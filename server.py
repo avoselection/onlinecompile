@@ -15,8 +15,9 @@ import socket
 import sys
 import tempfile
 import time
+import zipfile
 from html import escape
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 from asyncio.subprocess import PIPE, Process, create_subprocess_exec
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,9 +46,14 @@ HOST_RECONNECT_TIMEOUT_SECONDS = 5 * 60
 AUTOSAVE_FILENAME = "__autosave__.py"
 SESSION_STATE_FILENAME = "session_state.json"
 DOWNLOAD_TTL_SECONDS = 5 * 60
+MIN_STUDENT_SAVE_COOLDOWN_SECONDS = 60
+MAX_STUDENT_SAVE_COOLDOWN_SECONDS = 5 * 60
+DEFAULT_STUDENT_SAVE_COOLDOWN_SECONDS = 60
 MAX_DOCUMENT_BYTES = 1024 * 1024
 MAX_CHAT_MESSAGE_CHARS = 1000
 MAX_FILENAME_LENGTH = 120
+MAX_RUN_OUTPUT_CHARS = 240_000
+RUN_OUTPUT_CHUNK_BYTES = 4096
 WINDOWS_RESERVED_FILENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -64,6 +70,22 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def bounded_int_from_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+STUDENT_SAVE_COOLDOWN_SECONDS = bounded_int_from_env(
+    "ONLINECOMPILE_STUDENT_SAVE_COOLDOWN_SECONDS",
+    DEFAULT_STUDENT_SAVE_COOLDOWN_SECONDS,
+    MIN_STUDENT_SAVE_COOLDOWN_SECONDS,
+    MAX_STUDENT_SAVE_COOLDOWN_SECONDS,
+)
 
 
 def get_local_access_urls(port: int) -> List[str]:
@@ -214,6 +236,16 @@ def can_download_room(room_id: str) -> bool:
     return ts is not None and (time.time() - ts) <= DOWNLOAD_TTL_SECONDS
 
 
+def attachment_headers(filename: str) -> dict:
+    visible_name = str(filename or "download").replace("\r", "").replace("\n", "")
+    ascii_fallback = re.sub(r"[^A-Za-z0-9._-]", "_", visible_name).strip("._") or "download"
+    return {
+        "Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(visible_name, safe='')}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+    }
+
+
 def highlight_python_html(code_line: str) -> str:
     text = str(code_line or "")
     token_re = re.compile(r"(#[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*\b)", re.DOTALL)
@@ -321,8 +353,6 @@ def make_preexec():
     import resource
 
     def _limit():
-        with contextlib.suppress(Exception):
-            os.setsid()
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
@@ -501,13 +531,17 @@ class Session:
         self.last_saved_at = payload["last_saved_at"]
 
     def upsert_student_metric(self, client: Client) -> dict:
-        metrics = self.student_metrics.setdefault(client.name, {
+        metrics = self.student_metrics.setdefault(client.name, {})
+        metrics.update({
             "name": client.name,
-            "access_grants": 0,
-            "last_edit_at": None,
+            "access_grants": int(metrics.get("access_grants") or 0),
+            "last_edit_at": metrics.get("last_edit_at"),
+            "last_save_at": metrics.get("last_save_at"),
+            "last_save_ts": float(metrics.get("last_save_ts") or 0),
+            "last_save_filename": metrics.get("last_save_filename"),
         })
         metrics.pop("score", None)
-        client.access_grants = int(metrics.get("access_grants") or 0)
+        client.access_grants = metrics["access_grants"]
         return metrics
 
     def list_clients(self) -> List[dict]:
@@ -526,6 +560,7 @@ class Session:
                 "completed": client.completed,
                 "latency_ms": client.latency_ms,
                 "access_grants": metrics.get("access_grants", 0),
+                "cursor": {"line": client.cursor_line, "col": client.cursor_col},
             })
         return items
 
@@ -593,13 +628,54 @@ class Session:
             })
         return rows
 
-    def save_student_snapshot(self, client: Client):
+    def save_student_snapshot(self, client: Client, text: Optional[str] = None, filename: Optional[str] = None) -> Optional[str]:
         student_dir = os.path.join(self.students_dir, sanitize_personal_name(client.name))
         os.makedirs(student_dir, exist_ok=True)
-        path = os.path.join(student_dir, sanitize_filename(self.current_filename))
-        with contextlib.suppress(Exception):
+        safe_filename = sanitize_filename(filename or self.current_filename)
+        path = os.path.join(student_dir, safe_filename)
+        try:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(self.doc_text)
+                f.write(self.doc_text if text is None else str(text))
+            return safe_filename
+        except Exception:
+            return None
+
+    def student_save_cooldown_remaining(self, client: Client) -> int:
+        metrics = self.upsert_student_metric(client)
+        last_save_ts = float(metrics.get("last_save_ts") or 0)
+        elapsed = time.time() - last_save_ts
+        return max(0, int(STUDENT_SAVE_COOLDOWN_SECONDS - elapsed + 0.999))
+
+    def save_student_file(self, client: Client, filename: str, code: str) -> str:
+        safe_filename = self.save_student_snapshot(client, code, filename)
+        if safe_filename is None:
+            raise OSError("Не удалось сохранить личную копию студента.")
+
+        metrics = self.upsert_student_metric(client)
+        metrics["last_save_at"] = utc_iso()
+        metrics["last_save_ts"] = time.time()
+        metrics["last_save_filename"] = safe_filename
+        self.audit_log.append({
+            "at": utc_iso(),
+            "event": "student_save",
+            "room": self.room_id,
+            "student": client.name,
+            "file": safe_filename,
+        })
+        self.persist_state()
+        return safe_filename
+
+    def save_room_file(self, filename: str, code: str) -> str:
+        safe_filename = sanitize_filename(filename)
+        os.makedirs(self.saved_dir, exist_ok=True)
+        path = os.path.join(self.saved_dir, safe_filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code)
+        self.files[safe_filename] = code
+        if safe_filename == self.current_filename:
+            self.doc_text = code
+        self.persist_state()
+        return safe_filename
 
     async def send_to(self, client_id: str, payload: dict):
         client = self.clients.get(client_id)
@@ -611,16 +687,25 @@ class Session:
     async def broadcast(self, payload: dict, exclude: Optional[set] = None):
         exclude = exclude or set()
         message = json.dumps(payload, ensure_ascii=False)
-        to_remove: List[str] = []
-        for cid, client in list(self.clients.items()):
-            if cid in exclude:
-                continue
+
+        async def send_one(client_id: str, target: Client) -> Optional[str]:
             try:
-                await client.ws.send_text(message)
+                await asyncio.wait_for(target.ws.send_text(message), timeout=1.0)
+                return None
             except Exception:
-                to_remove.append(cid)
-        for cid in to_remove:
-            self.clients.pop(cid, None)
+                return client_id
+
+        tasks = [
+            send_one(client_id, target)
+            for client_id, target in list(self.clients.items())
+            if client_id not in exclude
+        ]
+        if not tasks:
+            return
+
+        for client_id in await asyncio.gather(*tasks):
+            if client_id is not None:
+                self.clients.pop(client_id, None)
 
     async def broadcast_participants(self):
         await self.broadcast({"type": "participants", "participants": self.list_clients()})
@@ -646,26 +731,57 @@ class Session:
         if not proc or proc.returncode is not None:
             return
 
-        try:
-            if os.name == "posix":
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
+        def signal_process(sig: Optional[signal.Signals] = None, force: bool = False):
+            if os.name == "posix" and sig is not None:
+                try:
+                    os.killpg(proc.pid, sig)
+                    return
+                except ProcessLookupError:
+                    return
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        os.kill(proc.pid, sig)
+                    return
+
+            if force:
                 proc.kill()
+            else:
+                proc.terminate()
+
+        with contextlib.suppress(ProcessLookupError, PermissionError, RuntimeError):
+            signal_process(signal.SIGTERM if os.name == "posix" else None, force=False)
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=0.4)
+            return
+        except asyncio.TimeoutError:
+            pass
         except ProcessLookupError:
             return
-        except Exception:
-            with contextlib.suppress(Exception):
-                proc.kill()
 
+        sigkill = getattr(signal, "SIGKILL", None)
+        with contextlib.suppress(ProcessLookupError, PermissionError, RuntimeError):
+            signal_process(sigkill if os.name == "posix" else None, force=True)
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(proc.wait(), timeout=1.5)
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
 
-    async def stop_running_code(self):
+    async def stop_running_code(self) -> bool:
+        task = self.run_task
+        proc = self.running_process
+        if (task is None or task.done()) and (proc is None or proc.returncode is not None):
+            return False
+
         self.stop_requested = True
-        if self.run_task and not self.run_task.done():
-            self.run_task.cancel()
         await self.terminate_running_process()
+
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.3)
+            except asyncio.TimeoutError:
+                task.cancel()
+            except asyncio.CancelledError:
+                pass
+        return True
 
     async def close_room(self, reason: str):
         await self.stop_running_code()
@@ -836,11 +952,33 @@ async def stream_pipe(session: Session, stream: Optional[asyncio.StreamReader], 
     if stream is None:
         return
     while True:
-        chunk = await stream.read(1024)
+        chunk = await stream.read(RUN_OUTPUT_CHUNK_BYTES)
         if not chunk:
             break
         text = chunk.decode("utf-8", "replace")
+        used = int(getattr(session, "run_output_chars", 0) or 0)
+        remaining = MAX_RUN_OUTPUT_CHARS - used
+        if remaining <= 0:
+            if not getattr(session, "run_output_truncated", False):
+                session.run_output_truncated = True
+                await session.broadcast({
+                    "type": "run_output",
+                    "stream": "stderr",
+                    "text": "\n[Output truncated: слишком много вывода, оставлена прокрутка терминала]\n",
+                })
+            await asyncio.sleep(0)
+            continue
+        if len(text) > remaining:
+            text = text[:remaining]
+            session.run_output_truncated = True
+            await session.broadcast({
+                "type": "run_output",
+                "stream": "stderr",
+                "text": "\n[Output truncated: слишком много вывода, оставлена прокрутка терминала]\n",
+            })
+        session.run_output_chars = used + len(text)
         await session.broadcast({"type": "run_output", "stream": stream_name, "text": text})
+        await asyncio.sleep(0)
 
 
 async def run_python_streaming(session: Session, code: str, timeout_s: float):
@@ -855,6 +993,8 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
     env["PYTHONIOENCODING"] = "utf-8"
     session.running_tmpdir = tmpdir
     session.stop_requested = False
+    session.run_output_chars = 0
+    session.run_output_truncated = False
 
     await session.broadcast({"type": "run_state", "running": True, "filename": filename, "clear": True})
 
@@ -873,6 +1013,7 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
             stderr=PIPE,
             env=env,
             preexec_fn=make_preexec(),
+            start_new_session=(os.name == "posix"),
         )
         session.running_process = proc
 
@@ -883,20 +1024,30 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
-        await session.broadcast({"type": "run_result", "ok": proc.returncode == 0, "timeout": False, "returncode": proc.returncode, "elapsed_ms": elapsed_ms})
+        stopped = session.stop_requested
+        if stopped:
+            await session.broadcast({"type": "run_output", "stream": "stderr", "text": "\n[Execution stopped]\n"})
+        await session.broadcast({
+            "type": "run_result",
+            "ok": proc.returncode == 0 and not stopped,
+            "timeout": False,
+            "stopped": stopped,
+            "returncode": proc.returncode,
+            "elapsed_ms": elapsed_ms,
+        })
     except asyncio.TimeoutError:
         await session.terminate_running_process()
         elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
         await session.broadcast({"type": "run_output", "stream": "stderr", "text": "\n[Timed out]\n"})
-        await session.broadcast({"type": "run_result", "ok": False, "timeout": True, "returncode": None, "elapsed_ms": elapsed_ms})
+        await session.broadcast({"type": "run_result", "ok": False, "timeout": True, "stopped": False, "returncode": None, "elapsed_ms": elapsed_ms})
     except asyncio.CancelledError:
         await session.terminate_running_process()
         await session.broadcast({"type": "run_output", "stream": "stderr", "text": "\n[Execution stopped]\n"})
-        await session.broadcast({"type": "run_result", "ok": False, "timeout": False, "returncode": None, "elapsed_ms": int((time.perf_counter() - start_ts) * 1000)})
+        await session.broadcast({"type": "run_result", "ok": False, "timeout": False, "stopped": True, "returncode": None, "elapsed_ms": int((time.perf_counter() - start_ts) * 1000)})
         raise
     except Exception as e:
         await session.broadcast({"type": "run_output", "stream": "stderr", "text": f"\n[Runner error] {e}\n"})
-        await session.broadcast({"type": "run_result", "ok": False, "timeout": False, "returncode": None, "elapsed_ms": int((time.perf_counter() - start_ts) * 1000)})
+        await session.broadcast({"type": "run_result", "ok": False, "timeout": False, "stopped": False, "returncode": None, "elapsed_ms": int((time.perf_counter() - start_ts) * 1000)})
     finally:
         session.stop_requested = False
         session.running_process = None
@@ -918,7 +1069,7 @@ def render_blame_html(room: str, filename: str, rows: List[dict]) -> str:
     )
     return f"""<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8"><title>Blame report</title>
-<style>body{{font-family:Inter,Arial,sans-serif;margin:24px}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #d0d7e2;padding:8px;vertical-align:top}}th{{background:#eef4ff}}pre{{margin:0;white-space:pre-wrap;font-family:Consolas,monospace}}.code-cell{{background:#0f172a;color:#e5eefc;border-radius:10px;padding:10px 12px}}.token-keyword{{color:#93c5fd;font-weight:700}}.token-string{{color:#86efac}}.token-comment{{color:#94a3b8;font-style:italic}}.token-number{{color:#fca5a5}}.token-name{{color:#e5eefc}}.report-toolbar{{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 20px}}.report-toolbar a{{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border-radius:12px;border:1px solid #d7e2f2;background:#eef4ff;color:#275efe;text-decoration:none;font-weight:600}}.report-note{{color:#5c6d89;margin:0 0 12px}}</style>
+<style>body{{font-family:Inter,Arial,sans-serif;margin:24px;color:#10213b;background:#fff}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #d0d7e2;padding:8px;vertical-align:top}}th{{background:#eef4ff}}pre{{margin:0;white-space:pre-wrap;font-family:Consolas,monospace}}.code-cell{{background:transparent;color:#10213b;border-radius:0;padding:0}}.token-keyword{{color:#275efe;font-weight:700}}.token-string{{color:#16803d}}.token-comment{{color:#64748b;font-style:italic}}.token-number{{color:#b45309}}.token-name{{color:#10213b}}.report-toolbar{{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 20px}}.report-toolbar a{{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border-radius:12px;border:1px solid #d7e2f2;background:#eef4ff;color:#275efe;text-decoration:none;font-weight:600}}.report-note{{color:#5c6d89;margin:0 0 12px}}</style>
 </head><body class="report-page">
 <h1>Blame-отчёт по файлу {filename_safe}</h1>
 <p>Комната: {room_safe}</p>
@@ -951,7 +1102,7 @@ def render_access_html(room: str, rows: List[dict]) -> str:
 @app.get("/")
 @app.get("/onlinecompile")
 async def index(_: Request):
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
@@ -964,6 +1115,26 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.post("/api/download-text")
+async def download_text_file(request: Request):
+    """Return an edited text file as a real HTTP attachment.
+
+    The browser receives Content-Disposition and Content-Length from the server,
+    which is more reliable than Blob/ObjectURL downloads on some systems.
+    """
+    body = await request.body()
+    if len(body) > MAX_DOCUMENT_BYTES * 8:
+        return JSONResponse({"ok": False, "message": "Файл слишком большой для скачивания."}, status_code=413)
+
+    params = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+    safe_filename = sanitize_filename((params.get("filename") or ["main.py"])[0])
+    content = (params.get("content") or [""])[0]
+    data = content.encode("utf-8")
+    headers = attachment_headers(safe_filename)
+    headers["Content-Length"] = str(len(data))
+    return Response(content=data, media_type="application/octet-stream", headers=headers)
+
+
 @app.get("/api/rooms/{room_id}/download")
 async def download_current_file(room_id: str, filename: str = "main.py"):
     room = sanitize_room_id(room_id)
@@ -974,7 +1145,31 @@ async def download_current_file(room_id: str, filename: str = "main.py"):
     content = str(session.files.get(safe_filename, session.doc_text if session.current_filename == safe_filename else ""))
     if safe_filename not in session.files and not content:
         return JSONResponse({"ok": False, "message": "Файл не найден."}, status_code=404)
-    return Response(content=content, media_type="text/x-python; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'})
+    data = content.encode("utf-8")
+    headers = attachment_headers(safe_filename)
+    headers["Content-Length"] = str(len(data))
+    return Response(content=data, media_type="application/octet-stream", headers=headers)
+
+
+@app.get("/api/rooms/{room_id}/download-all")
+async def download_all_room_files(room_id: str):
+    room = sanitize_room_id(room_id)
+    if not can_download_room(room):
+        return JSONResponse({"ok": False, "message": "Время скачивания истекло. Повторно откройте комнату."}, status_code=410)
+
+    session = sessions.get(room) or Session(room)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for filename, content in sorted(session.files.items()):
+            archive.writestr(sanitize_filename(filename), str(content))
+    data = output.getvalue()
+    headers = attachment_headers(f"{room}_files.zip")
+    headers["Content-Length"] = str(len(data))
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers=headers,
+    )
 
 
 @app.get("/api/rooms/{room_id}/reports/blame")
@@ -1200,6 +1395,7 @@ async def ws_endpoint(ws: WebSocket):
             "files": list(session.files.keys()),
             "participants": session.list_clients(),
             "active_editor_id": session.active_editor_id,
+            "limits": {"student_save_cooldown_seconds": STUDENT_SAVE_COOLDOWN_SECONDS},
         }, ensure_ascii=False))
 
         await session.broadcast_participants()
@@ -1240,6 +1436,11 @@ async def ws_endpoint(ws: WebSocket):
                 )
                 if not ok:
                     await client.ws.send_text(json.dumps({"type": "error", "message": error}, ensure_ascii=False))
+                    await client.ws.send_text(json.dumps({
+                        "type": "doc_full",
+                        "doc": {"text": session.doc_text, "version": session.version},
+                        "filename": session.current_filename,
+                    }, ensure_ascii=False))
 
             elif msg_type == "grant_edit":
                 if client.role != "host":
@@ -1315,32 +1516,46 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "stop_code":
                 if client.role != "host":
                     continue
-                await session.stop_running_code()
+                stopped = await session.stop_running_code()
+                if not stopped:
+                    await client.ws.send_text(json.dumps({"type": "error", "message": "Нет активного запуска кода."}, ensure_ascii=False))
 
             elif msg_type in {"save_py", "autosave"}:
-                if client.role != "host":
-                    if msg_type == "save_py":
-                        await client.ws.send_text(json.dumps({"type": "save_result", "ok": False, "error": "Сохранять общий файл может только преподаватель."}, ensure_ascii=False))
-                    continue
-
                 code = str(msg.get("code") or session.doc_text)
                 if utf8_size(code) > MAX_DOCUMENT_BYTES:
                     await client.ws.send_text(json.dumps({"type": "save_result", "ok": False, "error": "Размер файла превышает 1 МБ."}, ensure_ascii=False))
                     continue
-                requested_name = msg.get("filename") or session.current_filename
-                filename = sanitize_filename(str(requested_name))
-                os.makedirs(session.saved_dir, exist_ok=True)
-                path = os.path.join(session.saved_dir, filename)
+
+                requested_name = str(msg.get("filename") or session.current_filename)
                 try:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(code)
-                    session.files[filename] = code
-                    if filename == session.current_filename:
-                        session.doc_text = code
-                    session.persist_state()
-                    await client.ws.send_text(json.dumps({"type": "save_result", "ok": True, "filename": filename}, ensure_ascii=False))
+                    if client.role == "host":
+                        filename = session.save_room_file(requested_name, code)
+                        payload = {"type": "save_result", "ok": True, "filename": filename, "scope": "room_file", "request": msg_type}
+                    else:
+                        remaining = session.student_save_cooldown_remaining(client)
+                        if remaining > 0:
+                            payload = {
+                                "type": "save_result",
+                                "ok": False,
+                                "error": f"Личное сохранение доступно через {remaining} сек.",
+                                "cooldown_remaining": remaining,
+                                "cooldown_seconds": STUDENT_SAVE_COOLDOWN_SECONDS,
+                                "scope": "student_file",
+                                "request": msg_type,
+                            }
+                        else:
+                            filename = session.save_student_file(client, requested_name, code)
+                            payload = {
+                                "type": "save_result",
+                                "ok": True,
+                                "filename": filename,
+                                "scope": "student_file",
+                                "request": msg_type,
+                                "cooldown_seconds": STUDENT_SAVE_COOLDOWN_SECONDS,
+                            }
+                    await client.ws.send_text(json.dumps(payload, ensure_ascii=False))
                 except Exception as e:
-                    await client.ws.send_text(json.dumps({"type": "save_result", "ok": False, "error": str(e)}, ensure_ascii=False))
+                    await client.ws.send_text(json.dumps({"type": "save_result", "ok": False, "error": str(e), "request": msg_type}, ensure_ascii=False))
 
             elif msg_type == "switch_file":
                 if client.role != "host":
@@ -1411,7 +1626,10 @@ async def ws_endpoint(ws: WebSocket):
             if client.role == "host" and session.host_id == client.id:
                 session.host_id = None
                 session.persist_state()
-                await session.schedule_host_expiration()
+                if session.clients:
+                    await session.schedule_host_expiration()
+                else:
+                    sessions.pop(session.room_id, None)
             elif session.clients:
                 await session.broadcast_participants()
             else:

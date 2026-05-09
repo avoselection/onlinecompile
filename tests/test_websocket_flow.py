@@ -15,8 +15,9 @@ def recv_until(ws, predicate, max_messages=10):
 
 
 
-def test_host_student_flow_and_student_cannot_save_shared_file(tmp_path, monkeypatch):
+def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "get_host_config", lambda: {"hosts": [{"username": "Ведущий", "password": "ChangeMe123"}]})
     server.sessions.clear()
     client = TestClient(server.app)
 
@@ -53,16 +54,22 @@ def test_host_student_flow_and_student_cannot_save_shared_file(tmp_path, monkeyp
 
             student_ws.send_json({"type": "save_py", "filename": "hack.py", "code": "print(123)"})
             save_result = recv_until(student_ws, lambda msg: msg.get("type") == "save_result")
-            assert save_result["ok"] is False
+            assert save_result["ok"] is True
+            assert save_result["scope"] == "student_file"
+            assert (tmp_path / "demo-room" / "students" / "Student One" / "hack.py").read_text(encoding="utf-8") == "print(123)"
+
+            student_ws.send_json({"type": "save_py", "filename": "hack.py", "code": "print(456)"})
+            cooldown_result = recv_until(student_ws, lambda msg: msg.get("type") == "save_result")
+            assert cooldown_result["ok"] is False
+            assert cooldown_result["cooldown_remaining"] > 0
 
             host_ws.send_json({"type": "grant_edit", "target_id": student_welcome["you"]["id"]})
-            recv_until(
-                student_ws,
-                lambda msg: msg.get("type") == "participants" and any(
-                    participant["id"] == student_welcome["you"]["id"] and participant["can_edit"]
-                    for participant in msg["participants"]
-                ),
+            grant_predicate = lambda msg: msg.get("type") == "participants" and any(
+                participant["id"] == student_welcome["you"]["id"] and participant["can_edit"]
+                for participant in msg["participants"]
             )
+            recv_until(host_ws, grant_predicate)
+            recv_until(student_ws, grant_predicate)
 
             student_ws.send_json({
                 "type": "patch",
