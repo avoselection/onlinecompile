@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>onlinecompile</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260509-v5" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260531-v7" />
 </head>
 <body class="app-locked">
   <section id="entryScreen" class="entry-screen">
@@ -161,11 +161,12 @@
         </div>
 
         <div class="editor-body">
-          <div id="gutter">1</div>
-
           <div id="editorStage">
             <div id="editorMount" aria-label="Python editor"></div>
-            <textarea id="editor" spellcheck="false" wrap="off" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+            <div id="editorUnavailable" class="editor-unavailable" role="alert" tabindex="0" hidden>
+              <strong>Monaco Editor не загрузился</strong>
+              <span>Проверьте файлы редактора в static/vendor/monaco и перезагрузите страницу.</span>
+            </div>
             <div id="remoteCursors"></div>
           </div>
         </div>
@@ -213,6 +214,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=20260509-v5"></script>
+  <script src="/static/app.js?v=20260531-v7"></script>
 </body>
 </html>

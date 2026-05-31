@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import base64
 import contextlib
@@ -6,6 +7,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -14,7 +16,9 @@ import signal
 import socket
 import sys
 import tempfile
+import threading
 import time
+import tokenize
 import zipfile
 from html import escape
 from urllib.parse import parse_qs, quote
@@ -54,6 +58,9 @@ MAX_CHAT_MESSAGE_CHARS = 1000
 MAX_FILENAME_LENGTH = 120
 MAX_RUN_OUTPUT_CHARS = 240_000
 RUN_OUTPUT_CHUNK_BYTES = 4096
+MAX_CODE_LINES = 10_000
+MAX_CODE_LINE_CHARS = 20_000
+MAX_AST_BRACKET_DEPTH = 180
 WINDOWS_RESERVED_FILENAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -63,6 +70,21 @@ WINDOWS_RESERVED_FILENAMES = {
 PYTHON_KEYWORDS = {"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
     "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
     "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "match", "case"}
+
+BLOCKED_IMPORT_ROOTS = {
+    "builtins", "ctypes", "fcntl", "glob", "http", "importlib", "multiprocessing", "os", "pathlib", "pickle", "pkgutil",
+    "platform", "posix", "resource", "shlex", "shutil", "signal", "socket", "subprocess", "sys", "tempfile",
+    "urllib", "venv",
+}
+BLOCKED_CALL_NAMES = {
+    "__import__", "breakpoint", "compile", "delattr", "eval", "exec", "getattr", "globals", "input", "locals",
+    "open", "setattr", "vars",
+}
+BLOCKED_ATTRIBUTE_CALLS = {
+    "chmod", "chown", "connect", "execv", "execve", "fork", "kill", "killpg", "mkdir", "open",
+    "popen", "remove", "rename", "replace", "rmdir", "rmtree", "spawnl", "spawnlp", "spawnv", "spawnvp",
+    "system", "unlink", "write",
+}
 
 app = FastAPI()
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -97,6 +119,24 @@ def get_local_access_urls(port: int) -> List[str]:
             if host and not host.startswith("127.") and host not in {url.split('//', 1)[1].split(':', 1)[0] for url in urls}:
                 urls.append(f"http://{host}:{port}")
     return urls
+
+
+def preferred_ws_protocol() -> str:
+    try:
+        import wsproto  # noqa: F401
+        return "wsproto"
+    except ImportError:
+        return "websockets"
+
+
+def configure_websocket_logging(ws_protocol: str):
+    if ws_protocol != "websockets":
+        return
+    # Abrupt Wi-Fi/client disconnects can surface as noisy transport tracebacks
+    # inside the legacy websockets protocol, after the app has already handled
+    # the disconnect. Keep uvicorn logs readable for classroom sessions.
+    logging.getLogger("websockets.protocol").setLevel(logging.CRITICAL)
+    logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 
 def load_host_config() -> dict:
@@ -246,6 +286,19 @@ def attachment_headers(filename: str) -> dict:
     }
 
 
+def atomic_write_text(path: str, content: str):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.{secrets.token_hex(6)}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(str(content))
+        os.replace(tmp_path, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp_path)
+
+
 def highlight_python_html(code_line: str) -> str:
     text = str(code_line or "")
     token_re = re.compile(r"(#[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*\b)", re.DOTALL)
@@ -301,7 +354,7 @@ def authenticate_host(username: str, password: str) -> Tuple[bool, str]:
 
 
 def sanitize_room_id(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", (value or "").strip())
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", str(value or "").strip())
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
     return cleaned[:64] or "default"
 
@@ -332,18 +385,131 @@ def utf8_size(value: str) -> int:
     return len(str(value or "").encode("utf-8"))
 
 
+def clamp_int(value, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def clamp_float(value, default: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
 def sanitize_personal_name(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9А-Яа-яЁё _.-]", "", (name or "").strip())
+    cleaned = re.sub(r"[^A-Za-z0-9А-Яа-яЁё _.-]", "", str(name or "").strip())
     return cleaned[:60] or "Guest"
+
+
+class CodeSafetyError(ValueError):
+    pass
+
+
+def validate_code_shape(code: str):
+    text = str(code or "")
+    if utf8_size(text) > MAX_DOCUMENT_BYTES:
+        raise CodeSafetyError("Размер кода превышает 1 МБ.")
+
+    lines = text.splitlines()
+    if len(lines) > MAX_CODE_LINES:
+        raise CodeSafetyError(f"Слишком много строк кода: максимум {MAX_CODE_LINES}.")
+    if any(len(line) > MAX_CODE_LINE_CHARS for line in lines):
+        raise CodeSafetyError(f"Слишком длинная строка кода: максимум {MAX_CODE_LINE_CHARS} символов.")
+
+    depth = 0
+    max_depth = 0
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        for token in tokens:
+            if token.type != tokenize.OP:
+                continue
+            if token.string in "([{":
+                depth += 1
+                max_depth = max(max_depth, depth)
+                if max_depth > MAX_AST_BRACKET_DEPTH:
+                    raise CodeSafetyError(f"Слишком глубокая вложенность скобок: максимум {MAX_AST_BRACKET_DEPTH}.")
+            elif token.string in ")]}":
+                depth = max(0, depth - 1)
+    except tokenize.TokenError as exc:
+        raise CodeSafetyError(str(exc.args[0] if exc.args else "Ошибка токенизации кода.")) from exc
+
+
+def parse_code_safely(code: str) -> ast.AST:
+    validate_code_shape(code)
+    try:
+        return ast.parse(str(code or ""))
+    except SyntaxError as exc:
+        raise CodeSafetyError(f"{exc.msg} (line {exc.lineno}, col {exc.offset})") from exc
+    except (MemoryError, RecursionError) as exc:
+        raise CodeSafetyError("Код слишком сложный для безопасной проверки синтаксиса.") from exc
+
+
+class RunSafetyVisitor(ast.NodeVisitor):
+    def fail(self, node: ast.AST, message: str):
+        line = getattr(node, "lineno", "?")
+        raise CodeSafetyError(f"{message} (line {line})")
+
+    def visit_Import(self, node: ast.Import):
+        for alias in node.names:
+            root = alias.name.split(".", 1)[0]
+            if root in BLOCKED_IMPORT_ROOTS:
+                self.fail(node, f"Импорт модуля '{root}' запрещён в учебном запуске.")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        root = (node.module or "").split(".", 1)[0]
+        if root in BLOCKED_IMPORT_ROOTS:
+            self.fail(node, f"Импорт модуля '{root}' запрещён в учебном запуске.")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in BLOCKED_CALL_NAMES:
+            if func.id == "input":
+                self.fail(node, "Интерактивный ввод input() пока не поддерживается.")
+            self.fail(node, f"Вызов '{func.id}()' запрещён в учебном запуске.")
+        if isinstance(func, ast.Attribute) and func.attr in BLOCKED_ATTRIBUTE_CALLS:
+            self.fail(node, f"Вызов '.{func.attr}()' запрещён в учебном запуске.")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name):
+        if node.id == "__builtins__":
+            self.fail(node, "Доступ к __builtins__ запрещён в учебном запуске.")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        if node.attr.startswith("__"):
+            self.fail(node, "Доступ к dunder-атрибутам запрещён в учебном запуске.")
+        self.generic_visit(node)
+
+
+def validate_code_for_run(code: str) -> Tuple[bool, str]:
+    try:
+        tree = parse_code_safely(code)
+        RunSafetyVisitor().visit(tree)
+        return True, ""
+    except CodeSafetyError as exc:
+        return False, str(exc)
 
 
 def check_syntax(code: str) -> Tuple[bool, str]:
     try:
-        import ast
-        ast.parse(code)
+        parse_code_safely(code)
         return True, ""
-    except SyntaxError as e:
-        return False, f"{e.msg} (line {e.lineno}, col {e.offset})"
+    except CodeSafetyError as exc:
+        return False, str(exc)
 
 
 def make_preexec():
@@ -357,6 +523,9 @@ def make_preexec():
             resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
             resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+            if hasattr(resource, "RLIMIT_NPROC"):
+                resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
         except Exception:
             pass
 
@@ -390,6 +559,7 @@ class Session:
         self.host_reconnect_deadline: Optional[float] = None
         self.host_reconnect_task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
+        self.fs_lock = threading.RLock()
 
         self.doc_text: str = INITIAL_DOC
         self.version: int = 1
@@ -507,7 +677,6 @@ class Session:
         self.ensure_file_blame(self.current_filename, self.doc_text)
 
     def persist_state(self):
-        os.makedirs(self.saved_dir, exist_ok=True)
         payload = {
             "room_id": self.room_id,
             "version": self.version,
@@ -520,14 +689,17 @@ class Session:
             "last_saved_at": utc_iso(),
             "host_username": self.host_username,
         }
-        state_tmp = self.session_state_path() + ".tmp"
-        autosave_tmp = self.autosave_path() + ".tmp"
-        with open(state_tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(state_tmp, self.session_state_path())
-        with open(autosave_tmp, "w", encoding="utf-8") as f:
-            f.write(self.doc_text)
-        os.replace(autosave_tmp, self.autosave_path())
+        with self.fs_lock:
+            os.makedirs(self.saved_dir, exist_ok=True)
+            state_tmp = self.session_state_path() + f".{secrets.token_hex(6)}.tmp"
+            try:
+                with open(state_tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                os.replace(state_tmp, self.session_state_path())
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(state_tmp)
+            atomic_write_text(self.autosave_path(), self.doc_text)
         self.last_saved_at = payload["last_saved_at"]
 
     def upsert_student_metric(self, client: Client) -> dict:
@@ -630,12 +802,11 @@ class Session:
 
     def save_student_snapshot(self, client: Client, text: Optional[str] = None, filename: Optional[str] = None) -> Optional[str]:
         student_dir = os.path.join(self.students_dir, sanitize_personal_name(client.name))
-        os.makedirs(student_dir, exist_ok=True)
         safe_filename = sanitize_filename(filename or self.current_filename)
         path = os.path.join(student_dir, safe_filename)
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.doc_text if text is None else str(text))
+            with self.fs_lock:
+                atomic_write_text(path, self.doc_text if text is None else str(text))
             return safe_filename
         except Exception:
             return None
@@ -667,10 +838,9 @@ class Session:
 
     def save_room_file(self, filename: str, code: str) -> str:
         safe_filename = sanitize_filename(filename)
-        os.makedirs(self.saved_dir, exist_ok=True)
         path = os.path.join(self.saved_dir, safe_filename)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(code)
+        with self.fs_lock:
+            atomic_write_text(path, code)
         self.files[safe_filename] = code
         if safe_filename == self.current_filename:
             self.doc_text = code
@@ -989,8 +1159,11 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
     with open(path, "w", encoding="utf-8") as f:
         f.write(code)
 
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
+    env = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUNBUFFERED": "1",
+        "PATH": os.environ.get("PATH", ""),
+    }
     session.running_tmpdir = tmpdir
     session.stop_requested = False
     session.run_output_chars = 0
@@ -1006,9 +1179,11 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
         proc = await create_subprocess_exec(
             sys.executable,
             "-I",
+            "-S",
             "-u",
             path,
             cwd=tmpdir,
+            stdin=PIPE,
             stdout=PIPE,
             stderr=PIPE,
             env=env,
@@ -1016,6 +1191,11 @@ async def run_python_streaming(session: Session, code: str, timeout_s: float):
             start_new_session=(os.name == "posix"),
         )
         session.running_process = proc
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.write_eof()
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
 
         stdout_task = asyncio.create_task(stream_pipe(session, proc.stdout, "stdout"))
         stderr_task = asyncio.create_task(stream_pipe(session, proc.stderr, "stderr"))
@@ -1304,11 +1484,18 @@ async def ws_endpoint(ws: WebSocket):
     client: Optional[Client] = None
     client_ip = ws.client.host if ws.client else "127.0.0.1"
 
-    try:
-        raw = await ws.receive_text()
-        hello = json.loads(raw)
+    async def receive_payload() -> Optional[dict]:
+        raw_message = await ws.receive_text()
+        try:
+            payload = json.loads(raw_message)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
-        if hello.get("type") != "hello":
+    try:
+        hello = await receive_payload()
+
+        if not hello or hello.get("type") != "hello":
             await ws.send_text(json.dumps({"type": "auth_error", "message": "Ожидалось приветственное сообщение hello."}, ensure_ascii=False))
             await ws.close()
             return
@@ -1316,7 +1503,7 @@ async def ws_endpoint(ws: WebSocket):
         role = "host" if hello.get("role") == "host" else "student"
         name = sanitize_personal_name(hello.get("name") or ("Ведущий" if role == "host" else "Student"))
         room = sanitize_room_id(hello.get("room") or "default")
-        room_action = (hello.get("room_action") or ("join" if role == "student" else "create")).lower()
+        room_action = str(hello.get("room_action") or ("join" if role == "student" else "create")).lower()
 
         if role == "host":
             username = str(hello.get("username") or "").strip()
@@ -1401,15 +1588,17 @@ async def ws_endpoint(ws: WebSocket):
         await session.broadcast_participants()
 
         while True:
-            raw = await ws.receive_text()
-            msg = json.loads(raw)
+            msg = await receive_payload()
+            if msg is None:
+                await client.ws.send_text(json.dumps({"type": "error", "message": "Получено некорректное WebSocket-сообщение."}, ensure_ascii=False))
+                continue
             msg_type = msg.get("type")
 
             if msg_type == "cursor":
                 if client.role != "host" and (not client.can_edit or session.active_editor_id != client.id):
                     continue
-                client.cursor_line = max(1, int(msg.get("line", 1)))
-                client.cursor_col = max(1, int(msg.get("col", 1)))
+                client.cursor_line = clamp_int(msg.get("line"), 1, minimum=1)
+                client.cursor_col = clamp_int(msg.get("col"), 1, minimum=1)
                 await session.broadcast({
                     "type": "cursor",
                     "id": client.id,
@@ -1429,9 +1618,9 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "patch":
                 ok, error = await session.apply_patch(
                     client.id,
-                    int(msg.get("baseVersion", 0)),
-                    int(msg.get("start", 0)),
-                    int(msg.get("end", 0)),
+                    clamp_int(msg.get("baseVersion"), 0, minimum=0),
+                    clamp_int(msg.get("start"), 0, minimum=0),
+                    clamp_int(msg.get("end"), 0, minimum=0),
                     str(msg.get("text", "")),
                 )
                 if not ok:
@@ -1445,7 +1634,7 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "grant_edit":
                 if client.role != "host":
                     continue
-                target_id = msg.get("target_id")
+                target_id = str(msg.get("target_id") or "")
                 if session.active_editor_id and session.active_editor_id in session.clients:
                     session.clients[session.active_editor_id].can_edit = False
                 session.active_editor_id = None
@@ -1459,7 +1648,7 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "revoke_edit":
                 if client.role != "host":
                     continue
-                target_id = msg.get("target_id")
+                target_id = str(msg.get("target_id") or "")
                 if target_id in session.clients:
                     session.clients[target_id].can_edit = False
                     if session.active_editor_id == target_id:
@@ -1469,9 +1658,9 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "set_region":
                 if client.role != "host":
                     continue
-                target_id = msg.get("target_id")
-                start_line = max(1, int(msg.get("start_line", 1)))
-                end_line = max(1, int(msg.get("end_line", 1)))
+                target_id = str(msg.get("target_id") or "")
+                start_line = clamp_int(msg.get("start_line"), 1, minimum=1)
+                end_line = clamp_int(msg.get("end_line"), 1, minimum=1)
                 if target_id in session.clients:
                     session.clients[target_id].region = (min(start_line, end_line), max(start_line, end_line))
                 await session.broadcast_participants()
@@ -1479,7 +1668,7 @@ async def ws_endpoint(ws: WebSocket):
             elif msg_type == "clear_region":
                 if client.role != "host":
                     continue
-                target_id = msg.get("target_id")
+                target_id = str(msg.get("target_id") or "")
                 if target_id in session.clients:
                     session.clients[target_id].region = None
                 await session.broadcast_participants()
@@ -1488,7 +1677,13 @@ async def ws_endpoint(ws: WebSocket):
                 text = str(msg.get("text") or "").strip()
                 if text:
                     text = text[:MAX_CHAT_MESSAGE_CHARS]
-                    await session.broadcast({"type": "chat", "from": client.name, "text": text})
+                    await session.broadcast({
+                        "type": "chat",
+                        "from": client.name,
+                        "from_id": client.id,
+                        "color": client.color,
+                        "text": text,
+                    })
 
             elif msg_type == "check_syntax":
                 if client.role != "host":
@@ -1507,7 +1702,11 @@ async def ws_endpoint(ws: WebSocket):
                 if utf8_size(code) > MAX_DOCUMENT_BYTES:
                     await client.ws.send_text(json.dumps({"type": "error", "message": "Размер кода превышает 1 МБ."}, ensure_ascii=False))
                     continue
-                timeout_s = max(1.0, min(float(msg.get("timeout", 5.0)), 30.0))
+                safe_to_run, safety_error = validate_code_for_run(code)
+                if not safe_to_run:
+                    await client.ws.send_text(json.dumps({"type": "error", "message": safety_error}, ensure_ascii=False))
+                    continue
+                timeout_s = clamp_float(msg.get("timeout"), 5.0, minimum=1.0, maximum=30.0)
                 session.files[session.current_filename] = code
                 session.doc_text = code
                 session.persist_state()
@@ -1601,13 +1800,10 @@ async def ws_endpoint(ws: WebSocket):
                 await client.ws.send_text(json.dumps({"type": "pong", "ts": msg.get("ts"), "server_ts": int(time.time() * 1000)}, ensure_ascii=False))
 
             elif msg_type == "latency_update":
-                try:
-                    client.latency_ms = max(0, min(int(msg.get("latency_ms")), 9999))
-                except Exception:
-                    client.latency_ms = None
+                client.latency_ms = clamp_int(msg.get("latency_ms"), 0, minimum=0, maximum=9999)
                 await session.broadcast_participants()
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, OSError, RuntimeError):
         pass
     except Exception:
         with contextlib.suppress(Exception):
@@ -1649,6 +1845,8 @@ if __name__ == "__main__":
     else:
         port = 8000
         reload_enabled = os.environ.get("ONLINECOMPILE_RELOAD", "").strip().lower() in {"1", "true", "yes", "on"}
+        ws_protocol = preferred_ws_protocol()
+        configure_websocket_logging(ws_protocol)
         print("Сервер onlinecompile запускается. Открыть можно по адресам:", file=sys.stderr)
         for url in get_local_access_urls(port):
             print(f" - {url}", file=sys.stderr)
@@ -1661,6 +1859,9 @@ if __name__ == "__main__":
             host="0.0.0.0",
             port=port,
             reload=reload_enabled,
+            ws=ws_protocol,
+            ws_ping_interval=20.0,
+            ws_ping_timeout=20.0,
             reload_includes=["*.py", "*.html", "*.css", "*.js", "*.json"],
             reload_excludes=["room_data/*", "room_data/**/*", "*.csv", "*.tmp"],
         )

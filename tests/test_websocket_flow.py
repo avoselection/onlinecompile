@@ -52,6 +52,16 @@ def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_
                 ),
             )
 
+            student_ws.send_json({"type": "chat", "text": "hello"})
+            chat_message = recv_until(host_ws, lambda msg: msg.get("type") == "chat")
+            assert chat_message["from"] == "Student One"
+            assert chat_message["from_id"] == student_welcome["you"]["id"]
+            assert chat_message["color"] == student_welcome["you"]["color"]
+
+            student_ws.send_text("{bad json")
+            bad_message = recv_until(student_ws, lambda msg: msg.get("type") == "error")
+            assert "некоррект" in bad_message["message"].lower()
+
             student_ws.send_json({"type": "save_py", "filename": "hack.py", "code": "print(123)"})
             save_result = recv_until(student_ws, lambda msg: msg.get("type") == "save_result")
             assert save_result["ok"] is True

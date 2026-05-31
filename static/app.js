@@ -15,6 +15,7 @@
     username: "",
     password: "",
     docText: "",
+    editorValue: "",
     docVersion: 0,
     currentFilename: "main.py",
     applyingRemote: false,
@@ -22,6 +23,7 @@
     queuedText: null,
     awaitingFullSync: false,
     reconnectTimer: null,
+    reconnectDelayMs: 2000,
     pingTimer: null,
     autosaveTimer: null,
     manualClose: false,
@@ -29,6 +31,7 @@
     monacoEditor: null,
     monacoModel: null,
     monacoCompletionProvider: null,
+    editorReadOnly: true,
     lspStatus: "local",
     participants: [],
     isRunning: false,
@@ -60,10 +63,9 @@
   const easterEggEl = document.getElementById("easterEgg");
   const closeEasterEggBtn = document.getElementById("closeEasterEgg");
 
-  const editorTextarea = document.getElementById("editor");
   const editorMount = document.getElementById("editorMount");
+  const editorUnavailable = document.getElementById("editorUnavailable");
   const editorBody = document.querySelector(".editor-body");
-  const gutterEl = document.getElementById("gutter");
   const remoteCursorsEl = document.getElementById("remoteCursors");
   const participantsEl = document.getElementById("participants");
   const participantSelect = document.getElementById("participantSelect");
@@ -170,23 +172,67 @@
 
   function syncMonacoTheme() {
     if (!state.monaco?.editor) return;
-    state.monaco.editor.setTheme(isDarkThemeActive() ? "vs-dark" : "vs");
+    if (document.body.classList.contains("theme-avo")) {
+      state.monaco.editor.setTheme("onlinecompile-avo");
+    } else if (isDarkThemeActive()) {
+      state.monaco.editor.setTheme("onlinecompile-dark");
+    } else {
+      state.monaco.editor.setTheme("vs");
+    }
+  }
+
+  function defineMonacoThemes() {
+    if (!state.monaco?.editor) return;
+    state.monaco.editor.defineTheme("onlinecompile-dark", {
+      base: "vs-dark",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.background": "#0b0b0b",
+        "editor.foreground": "#f4f0eb",
+        "editorLineNumber.foreground": "#706a62",
+        "editorCursor.foreground": "#ff9a62",
+        "editor.lineHighlightBackground": "#17120f",
+        "editor.selectionBackground": "#553420",
+        "editor.inactiveSelectionBackground": "#33241b",
+        "editorGutter.background": "#0b0b0b",
+      },
+    });
+    state.monaco.editor.defineTheme("onlinecompile-avo", {
+      base: "vs",
+      inherit: true,
+      rules: [
+        { token: "keyword", foreground: "1e63ff", fontStyle: "bold" },
+        { token: "string", foreground: "087d67" },
+        { token: "number", foreground: "c83243" },
+        { token: "comment", foreground: "7b6f55", fontStyle: "italic" },
+      ],
+      colors: {
+        "editor.background": "#fff9fd",
+        "editor.foreground": "#26112d",
+        "editorLineNumber.foreground": "#9d6a95",
+        "editorCursor.foreground": "#1e63ff",
+        "editor.lineHighlightBackground": "#ffe6f7",
+        "editor.selectionBackground": "#b9d0ff",
+        "editor.inactiveSelectionBackground": "#f2c8ec",
+        "editorGutter.background": "#fff0fb",
+      },
+    });
   }
 
   function getEditorText() {
     if (state.monacoModel) return state.monacoModel.getValue();
-    return editorTextarea.value;
+    return state.editorValue || state.docText || "";
   }
 
   function setEditorText(text) {
     const safeText = String(text ?? "");
+    state.editorValue = safeText;
     if (state.monacoModel) {
       const current = state.monacoModel.getValue();
       if (current === safeText) return;
       state.monacoModel.setValue(safeText);
-      return;
     }
-    editorTextarea.value = safeText;
   }
 
   function getSelectionStart() {
@@ -195,33 +241,23 @@
       if (!selection) return 0;
       return state.monacoModel.getOffsetAt(selection.getStartPosition());
     }
-    return editorTextarea.selectionStart || 0;
-  }
-
-  function getSelectionEnd() {
-    if (state.monacoEditor && state.monacoModel) {
-      const selection = state.monacoEditor.getSelection();
-      if (!selection) return 0;
-      return state.monacoModel.getOffsetAt(selection.getEndPosition());
-    }
-    return editorTextarea.selectionEnd || 0;
+    return 0;
   }
 
   function focusEditor() {
     if (state.monacoEditor) {
       state.monacoEditor.focus();
     } else {
-      editorTextarea.focus();
+      editorUnavailable?.focus();
     }
   }
 
   function setReadOnly(readOnly) {
-    editorTextarea.readOnly = readOnly;
-    editorTextarea.classList.toggle("readonly", readOnly);
+    state.editorReadOnly = Boolean(readOnly);
+    editorMount?.classList.toggle("readonly", state.editorReadOnly);
 
     if (state.monacoEditor) {
-      state.monacoEditor.updateOptions({ readOnly });
-      editorMount.classList.toggle("readonly", readOnly);
+      state.monacoEditor.updateOptions({ readOnly: state.editorReadOnly });
     }
   }
 
@@ -416,6 +452,41 @@
     runOutput.textContent = "";
   }
 
+  function colorForParticipant(fromId, fromName) {
+    const byId = fromId ? state.participants.find((participant) => participant.id === fromId) : null;
+    if (byId?.color) return byId.color;
+    const normalizedName = String(fromName || "").trim().toLowerCase();
+    const byName = normalizedName
+      ? state.participants.find((participant) => String(participant.name || "").trim().toLowerCase() === normalizedName)
+      : null;
+    return byName?.color || "#ff92f9";
+  }
+
+  function normalizeChatMessage(message) {
+    if (message && typeof message === "object") {
+      const from = String(message.from || "Система");
+      return {
+        from,
+        fromId: message.fromId || null,
+        text: String(message.text || ""),
+        color: message.color || colorForParticipant(message.fromId, from),
+      };
+    }
+
+    const raw = String(message ?? "");
+    const separator = raw.indexOf(":");
+    if (separator > 0) {
+      const from = raw.slice(0, separator).trim() || "Система";
+      return {
+        from,
+        fromId: null,
+        text: raw.slice(separator + 1).trimStart(),
+        color: colorForParticipant(null, from),
+      };
+    }
+    return { from: "Система", fromId: null, text: raw, color: "#ff92f9" };
+  }
+
   function renderChat() {
     if (!chatBox) return;
     chatBox.innerHTML = "";
@@ -427,10 +498,24 @@
       empty.textContent = "Сообщений пока нет";
       chatBox.appendChild(empty);
     } else {
-      messages.forEach((line) => {
+      messages.forEach((message) => {
+        const normalized = normalizeChatMessage(message);
+        const color = normalized.color || colorForParticipant(normalized.fromId, normalized.from);
         const item = document.createElement("div");
         item.className = "chat-line";
-        item.textContent = line;
+
+        const author = document.createElement("span");
+        author.className = "chat-author";
+        author.style.color = color;
+        author.style.background = colorToRgba(color, 0.16);
+        author.style.borderColor = colorToRgba(color, 0.44);
+        author.textContent = normalized.from;
+
+        const text = document.createElement("span");
+        text.className = "chat-text";
+        text.textContent = normalized.text;
+
+        item.append(author, text);
         chatBox.appendChild(item);
       });
     }
@@ -444,8 +529,8 @@
     chatBox.scrollTop = chatBox.scrollHeight;
   }
 
-  function appendChat(line) {
-    state.chatMessages.push(String(line ?? ""));
+  function appendChat(message) {
+    state.chatMessages.push(normalizeChatMessage(message));
     if (state.chatMessages.length > MAX_CHAT_MESSAGES) {
       state.chatMessages.splice(0, state.chatMessages.length - MAX_CHAT_MESSAGES);
     }
@@ -482,18 +567,8 @@
     currentFileSpan.textContent = current;
   }
 
-  function syncFallbackGutter() {
-    if (!gutterEl || state.monacoEditor) return;
-    gutterEl.scrollTop = editorTextarea.scrollTop;
-  }
-
-  function updateGutter() {
-    if (!gutterEl) return;
-    const lines = getEditorText().split("\n").length;
-    const digits = String(lines).length;
-    gutterEl.style.width = `${Math.max(48, digits * 12 + 20)}px`;
-    gutterEl.textContent = Array.from({ length: lines }, (_, index) => String(index + 1)).join("\n");
-    syncFallbackGutter();
+  function updateEditorLayout() {
+    state.monacoEditor?.layout();
   }
 
   function colorToRgba(color, alpha = 0.22) {
@@ -565,14 +640,10 @@
         const coords = state.monacoEditor.getScrolledVisiblePosition(position);
         return coords ? { top: coords.top, left: coords.left, height: coords.height || 18 } : null;
       } catch (error) {
-        console.debug("monaco cursor coords fallback", error);
+        console.debug("monaco cursor coordinates unavailable", error);
       }
     }
-    return {
-      top: 14 + (line - 1) * 21 - editorTextarea.scrollTop,
-      left: 14 + (col - 1) * 8 - editorTextarea.scrollLeft,
-      height: 18,
-    };
+    return null;
   }
 
   function renderRemoteCursors() {
@@ -831,9 +902,8 @@
       return false;
     }
 
-    editorTextarea.value = nextText;
     state.docText = nextText;
-    updateGutter();
+    updateEditorLayout();
     updateCursorStatus();
     renderRemoteCursors();
     return true;
@@ -983,6 +1053,7 @@ except Exception as error:
       }
 
       state.monaco = window.monaco;
+      defineMonacoThemes();
       syncMonacoTheme();
 
       if (state.monacoCompletionProvider) {
@@ -1025,7 +1096,7 @@ except Exception as error:
         },
       });
 
-      state.monacoModel = state.monaco.editor.createModel(editorTextarea.value || "", "python");
+      state.monacoModel = state.monaco.editor.createModel(state.editorValue || state.docText || "", "python");
       state.monacoEditor = state.monaco.editor.create(editorMount, {
         model: state.monacoModel,
         automaticLayout: true,
@@ -1051,13 +1122,13 @@ except Exception as error:
         renderLineHighlight: "line",
         scrollbar: { alwaysConsumeMouseWheel: false },
         padding: { top: 14, bottom: 14 },
-        readOnly: editorTextarea.readOnly,
+        readOnly: state.editorReadOnly,
       });
 
       state.monacoEditor.onDidChangeModelContent(() => {
         const text = state.monacoModel.getValue();
-        editorTextarea.value = text;
-        updateGutter();
+        state.editorValue = text;
+        updateEditorLayout();
         updateCursorStatus();
         renderRemoteCursors();
         sendDocumentPatch(text);
@@ -1071,19 +1142,21 @@ except Exception as error:
 
       editorMount.classList.add("is-active");
       editorBody?.classList.add("monaco-active");
-      editorMount.style.display = "block";
+      editorMount.hidden = false;
+      if (editorUnavailable) editorUnavailable.hidden = true;
       window.requestAnimationFrame(() => state.monacoEditor?.layout());
-      editorTextarea.style.display = "none";
       setLspStatus("Monaco Editor", "ok");
-      updateGutter();
+      updateEditorLayout();
       updateCursorStatus();
       renderRemoteCursors();
     } catch (error) {
-      console.warn("Monaco unavailable, fallback to textarea.", error);
-      setLspStatus("Текстовый режим", "error");
+      console.warn("Monaco unavailable.", error);
+      setLspStatus("Monaco недоступен", "error");
       editorBody?.classList.remove("monaco-active");
-      editorTextarea.style.display = "block";
-      editorMount.style.display = "none";
+      editorMount.hidden = true;
+      if (editorUnavailable) editorUnavailable.hidden = false;
+      remoteCursorsEl.innerHTML = "";
+      toast("Monaco Editor не загрузился. Проверьте локальные файлы редактора.");
     }
   }
 
@@ -1120,7 +1193,7 @@ except Exception as error:
         updateHeaderInfo();
         updateFileList(msg.files || [], state.currentFilename);
         renderParticipants(msg.participants || []);
-        updateGutter();
+        updateEditorLayout();
         updateCursorStatus();
         setDocVersionLabel();
         setConnectionBadge("Подключено", "ok");
@@ -1160,7 +1233,7 @@ except Exception as error:
         state.applyingRemote = true;
         setEditorText(state.docText);
         state.applyingRemote = false;
-        updateGutter();
+        updateEditorLayout();
         updateCursorStatus();
         currentFileSpan.textContent = state.currentFilename;
         setDocVersionLabel();
@@ -1186,7 +1259,12 @@ except Exception as error:
       }
 
       case "chat":
-        appendChat(`${msg.from}: ${msg.text}`);
+        appendChat({
+          from: msg.from,
+          fromId: msg.from_id,
+          text: msg.text,
+          color: msg.color,
+        });
         break;
 
       case "syntax_result":
@@ -1272,6 +1350,7 @@ except Exception as error:
     state.ws = new WebSocket(`${protocol}${window.location.host}/ws`);
 
     state.ws.onopen = () => {
+      state.reconnectDelayMs = 2000;
       setConnectionBadge("Авторизация…", "idle");
       showAuthError("");
       state.ws.send(JSON.stringify({
@@ -1287,8 +1366,13 @@ except Exception as error:
     };
 
     state.ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      handleMessage(msg);
+      try {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+      } catch (error) {
+        console.warn("invalid websocket message", error);
+        appendConsole("[error] Получено некорректное сообщение от сервера\n");
+      }
     };
 
     state.ws.onclose = () => {
@@ -1298,44 +1382,20 @@ except Exception as error:
       state.stopRequested = false;
       updateButtons(currentClientCanEdit());
       if (state.manualClose) return;
-      setConnectionBadge("Переподключение…", "idle");
+      setReadOnly(true);
+      const offline = navigator.onLine === false;
+      setConnectionBadge(offline ? "Нет сети" : "Переподключение…", offline ? "warn" : "idle");
       if (!state.hasConnectedOnce) {
         showWorkspace(false);
         showEntryScreen(true);
         showAuthError("Не удалось установить соединение. Проверьте введённые данные и доступность сервера.");
       }
-      state.reconnectTimer = window.setTimeout(connect, 2000);
+      const delay = offline ? Math.max(state.reconnectDelayMs, 5000) : state.reconnectDelayMs;
+      state.reconnectTimer = window.setTimeout(connect, delay);
+      state.reconnectDelayMs = Math.min(Math.round(state.reconnectDelayMs * 1.5), 15000);
     };
 
     state.ws.onerror = () => setConnectionBadge("Ошибка соединения", "error");
-  }
-
-  function bindFallbackEvents() {
-    editorTextarea.addEventListener("input", () => {
-      updateGutter();
-      updateCursorStatus();
-      sendDocumentPatch(editorTextarea.value);
-    });
-
-    ["keyup", "click", "select"].forEach((eventName) => {
-      editorTextarea.addEventListener(eventName, updateCursorStatus);
-    });
-    editorTextarea.addEventListener("scroll", () => {
-      syncFallbackGutter();
-      renderRemoteCursors();
-    });
-
-    editorTextarea.addEventListener("keydown", (event) => {
-      if (event.key === "Tab") {
-        event.preventDefault();
-        const start = editorTextarea.selectionStart;
-        const end = editorTextarea.selectionEnd;
-        const value = editorTextarea.value;
-        editorTextarea.value = `${value.slice(0, start)}    ${value.slice(end)}`;
-        editorTextarea.selectionStart = editorTextarea.selectionEnd = start + 4;
-        editorTextarea.dispatchEvent(new Event("input"));
-      }
-    });
   }
 
   function openReport(url) {
@@ -1354,83 +1414,55 @@ except Exception as error:
     return cleaned.toLowerCase().endsWith(".zip") ? cleaned : `${cleaned}.zip`;
   }
 
-  function getDownloadFrame() {
-    let frame = document.getElementById("downloadFrame");
-    if (!frame) {
-      frame = document.createElement("iframe");
-      frame.id = "downloadFrame";
-      frame.name = "downloadFrame";
-      frame.title = "download";
-      frame.setAttribute("aria-hidden", "true");
-      Object.assign(frame.style, {
-        position: "fixed",
-        left: "-10000px",
-        top: "0",
-        width: "1px",
-        height: "1px",
-        border: "0",
-        opacity: "0",
-        pointerEvents: "none",
-      });
-      document.body.appendChild(frame);
-    }
-    return frame;
-  }
-
-  function submitDownloadForm(filename, text) {
-    const safeFilename = normalizeDownloadFilename(filename);
-    const frame = getDownloadFrame();
-    const form = document.createElement("form");
-    form.method = "POST";
-    form.action = "/api/download-text";
-    form.target = frame.name;
-    form.acceptCharset = "UTF-8";
-    Object.assign(form.style, {
-      position: "fixed",
-      left: "-10000px",
-      top: "0",
-      width: "1px",
-      height: "1px",
-      overflow: "hidden",
-    });
-
-    const filenameInput = document.createElement("input");
-    filenameInput.type = "hidden";
-    filenameInput.name = "filename";
-    filenameInput.value = safeFilename;
-
-    const contentInput = document.createElement("textarea");
-    contentInput.name = "content";
-    contentInput.value = String(text ?? "");
-
-    form.append(filenameInput, contentInput);
-    document.body.appendChild(form);
-    form.submit();
-    window.setTimeout(() => form.remove(), 60000);
-    toast(`Скачивание начато: ${safeFilename}`);
-  }
-
-  function downloadUrlThroughBrowser(url) {
-    const frame = getDownloadFrame();
+  function triggerBrowserDownload(filename, blob) {
     const link = document.createElement("a");
-    link.href = `${url}${url.includes("?") ? "&" : "?"}_=${Date.now()}`;
-    link.target = frame.name;
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = filename;
     link.rel = "noopener";
     link.style.display = "none";
     document.body.appendChild(link);
     link.click();
-    window.setTimeout(() => link.remove(), 60000);
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+      link.remove();
+    }, 1000);
   }
 
   function downloadCurrentEditorFile() {
-    submitDownloadForm(state.currentFilename || "main.py", getEditorText());
+    const safeFilename = normalizeDownloadFilename(state.currentFilename || "main.py");
+    const blob = new Blob([getEditorText()], { type: "text/x-python;charset=utf-8" });
+    triggerBrowserDownload(safeFilename, blob);
+    toast(`Скачивание начато: ${safeFilename}`);
   }
 
-  function downloadRoomArchive() {
+  async function downloadRoomArchive() {
     if (!state.room) return;
     const filename = normalizeArchiveFilename(`${state.room || "onlinecompile"}_files.zip`);
-    downloadUrlThroughBrowser(`/api/rooms/${encodeURIComponent(state.room)}/download-all`);
-    toast(`Скачивание начато: ${filename}`);
+    if (downloadAllBtn) downloadAllBtn.disabled = true;
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(state.room)}/download-all?_=${Date.now()}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        let message = `Не удалось скачать архив: ${response.status}`;
+        try {
+          const payload = await response.json();
+          if (payload?.message) message = payload.message;
+        } catch (_error) {
+          const text = await response.text();
+          if (text) message = text.slice(0, 180);
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      triggerBrowserDownload(filename, blob);
+      toast(`Скачивание начато: ${filename}`);
+    } catch (error) {
+      toast(error?.message || "Не удалось скачать архив");
+    } finally {
+      if (downloadAllBtn) downloadAllBtn.disabled = false;
+    }
   }
 
   function bindEntryEvents() {
@@ -1471,8 +1503,21 @@ except Exception as error:
 
   function bindCommonEvents() {
     window.addEventListener("resize", () => {
-      updateGutter();
+      updateEditorLayout();
       renderRemoteCursors();
+    });
+
+    window.addEventListener("offline", () => {
+      if (!state.manualClose) setConnectionBadge("Нет сети", "warn");
+    });
+
+    window.addEventListener("online", () => {
+      if (state.manualClose) return;
+      state.reconnectDelayMs = 1000;
+      if (!state.ws || state.ws.readyState === WebSocket.CLOSED || state.ws.readyState === WebSocket.CLOSING) {
+        clearTimeout(state.reconnectTimer);
+        connect();
+      }
     });
 
     grantBtn.addEventListener("click", () => {
@@ -1596,7 +1641,6 @@ except Exception as error:
     setReadOnly(true);
     renderChat();
 
-    bindFallbackEvents();
     bindEntryEvents();
     bindCommonEvents();
     initKonamiCode();

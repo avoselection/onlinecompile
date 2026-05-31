@@ -41,6 +41,34 @@ def test_empty_room_directories_are_not_persisted_data(tmp_path):
     assert not server.room_has_persisted_data("demo")
 
 
+def test_syntax_check_rejects_excessive_bracket_depth():
+    code = "x = " + ("(" * (server.MAX_AST_BRACKET_DEPTH + 1)) + "1" + (")" * (server.MAX_AST_BRACKET_DEPTH + 1))
+    ok, error = server.check_syntax(code)
+
+    assert not ok
+    assert "вложенность" in error.lower()
+
+
+def test_run_validation_blocks_unsafe_file_and_process_access():
+    unsafe_samples = [
+        "import os\nos.system('echo unsafe')\n",
+        "print(open('config.json').read())\n",
+        "name = input('Введите имя: ')\n",
+        "__builtins__.__dict__['open']('config.json').read()\n",
+    ]
+
+    for code in unsafe_samples:
+        ok, error = server.validate_code_for_run(code)
+        assert not ok
+        assert error
+
+
+def test_run_validation_allows_simple_python_code():
+    ok, error = server.validate_code_for_run("import math\nprint(math.sqrt(9))\n")
+
+    assert ok, error
+
+
 @pytest.mark.asyncio
 async def test_student_patch_requires_granted_active_editor():
     session = server.Session("demo")
