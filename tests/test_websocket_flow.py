@@ -90,3 +90,46 @@ def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_
             })
             update = recv_until(student_ws, lambda msg: msg.get("type") == "doc_update")
             assert update["version"] == student_welcome["doc"]["version"] + 1
+<<<<<<< HEAD
+=======
+
+
+def test_chat_anti_spam_throttles_rapid_burst(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "get_host_config", lambda: {"hosts": [{"username": "Ведущий", "password": "ChangeMe123"}]})
+    server.sessions.clear()
+    client = TestClient(server.app)
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({
+            "type": "hello",
+            "role": "host",
+            "name": "Ведущий",
+            "username": "Ведущий",
+            "password": "ChangeMe123",
+            "room": "spam-room",
+            "room_action": "create",
+        })
+        recv_until(host_ws, lambda msg: msg.get("type") == "welcome")
+
+        with client.websocket_connect("/ws") as student_ws:
+            student_ws.send_json({"type": "hello", "role": "student", "name": "Spammer", "room": "spam-room"})
+            recv_until(student_ws, lambda msg: msg.get("type") == "welcome")
+
+            # A single message must always go through (no false positive).
+            student_ws.send_json({"type": "chat", "text": "hi"})
+            first = recv_until(student_ws, lambda msg: msg.get("type") == "chat")
+            assert first["text"] == "hi"
+
+            # A burst above the threshold must arm the anti-spam penalty.
+            for i in range(CHAT_BURST := server.CHAT_RAPID_THRESHOLD + 3):
+                student_ws.send_json({"type": "chat", "text": f"spam{i}"})
+
+            throttled = recv_until(
+                student_ws,
+                lambda msg: msg.get("type") == "chat_throttled",
+                max_messages=4 * CHAT_BURST,
+            )
+            assert throttled["retry_after"] >= 1
+            assert "нтиспам" in throttled["message"]
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)

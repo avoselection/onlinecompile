@@ -1,5 +1,8 @@
 import asyncio
+<<<<<<< HEAD
 
+=======
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
 import json
 
 import pytest
@@ -59,7 +62,11 @@ def test_run_validation_blocks_unsafe_file_and_process_access():
 
     for code in unsafe_samples:
         ok, error = server.validate_code_for_run(code)
+<<<<<<< HEAD
         assert not ok
+=======
+        assert not ok, f"Expected block for: {code!r}"
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         assert error
 
 
@@ -96,7 +103,13 @@ async def test_patch_size_limit_is_enforced():
     host = server.Client(ws=DummyWebSocket(), name="Host", role="host", color="#000", can_edit=True)
     session.clients[host.id] = host
 
+<<<<<<< HEAD
     ok, error = await session.apply_patch(host.id, session.version, 0, 0, "x" * (server.MAX_DOCUMENT_BYTES + 1))
+=======
+    ok, error = await session.apply_patch(
+        host.id, session.version, 0, 0, "x" * (server.MAX_DOCUMENT_BYTES + 1)
+    )
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
     assert not ok
     assert "1 МБ" in error
 
@@ -108,7 +121,13 @@ async def test_stop_running_code_terminates_active_process(tmp_path):
     session.clients[host.id] = host
 
     session.run_task = asyncio.create_task(
+<<<<<<< HEAD
         server.run_python_streaming(session, "import time\nwhile True:\n    time.sleep(0.1)\n", 30)
+=======
+        server.run_python_streaming(
+            session, "import time\nwhile True:\n    time.sleep(0.1)\n", 30
+        )
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
     )
 
     for _ in range(50):
@@ -120,8 +139,13 @@ async def test_stop_running_code_terminates_active_process(tmp_path):
     assert await session.stop_running_code() is True
     await asyncio.wait_for(session.run_task or asyncio.sleep(0), timeout=3)
 
+<<<<<<< HEAD
     run_results = [message for message in host.ws.messages if message.get("type") == "run_result"]
     assert any(message.get("stopped") is True for message in run_results)
+=======
+    run_results = [m for m in host.ws.messages if m.get("type") == "run_result"]
+    assert any(m.get("stopped") is True for m in run_results)
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
     assert session.running_process is None
 
 
@@ -146,8 +170,55 @@ async def test_host_delete_patch_restores_prior_text_and_broadcasts_deletion():
     assert session.doc_text == original_text
 
     deletion_updates = [
+<<<<<<< HEAD
         message for message in student.ws.messages
         if message.get("type") == "doc_update" and message.get("version") == version_after_insert + 1
     ]
     assert deletion_updates
     assert deletion_updates[-1]["patch"] == {"start": 0, "end": len(inserted), "text": ""}
+=======
+        m for m in student.ws.messages
+        if m.get("type") == "doc_update" and m.get("version") == version_after_insert + 1
+    ]
+    assert deletion_updates
+    assert deletion_updates[-1]["patch"] == {"start": 0, "end": len(inserted), "text": ""}
+
+
+@pytest.mark.asyncio
+async def test_next_color_wraps_around_and_never_raises():
+    """Color cycle should wrap instead of raising StopIteration."""
+    session = server.Session("color-demo")
+    # Request more colours than the palette contains.
+    colors = [session.next_color() for _ in range(len(server._CLIENT_COLORS) * 2 + 1)]
+    assert all(isinstance(c, str) and c.startswith("#") for c in colors)
+
+
+@pytest.mark.asyncio
+async def test_persist_state_debounce_coalesces_rapid_edits(tmp_path, monkeypatch):
+    """schedule_persist should result in at most one disk write per debounce window."""
+    monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    write_count = 0
+    original_persist = server.Session.persist_state
+
+    def counting_persist(self):
+        nonlocal write_count
+        write_count += 1
+        original_persist(self)
+
+    monkeypatch.setattr(server.Session, "persist_state", counting_persist)
+
+    session = server.Session("debounce-demo")
+    host = server.Client(ws=DummyWebSocket(), name="Host", role="host", color="#000", can_edit=True)
+    session.clients[host.id] = host
+
+    write_count = 0  # reset after __init__
+
+    for i in range(5):
+        await session.apply_patch(host.id, session.version, 0, 0, f"# line {i}\n")
+
+    # Allow the debounce timer to fire.
+    await asyncio.sleep(server.PERSIST_DEBOUNCE_SECONDS + 0.1)
+
+    # Five rapid patches should produce far fewer than 5 disk writes.
+    assert write_count < 5
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)

@@ -4,13 +4,28 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>onlinecompile</title>
+<<<<<<< HEAD
   <link rel="stylesheet" href="/static/styles.css?v=20260531-v7" />
 </head>
 <body class="app-locked">
+=======
+  <meta name="color-scheme" content="light dark" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260605-v18" />
+  <!--
+    xterm.js styles. Loaded from local vendor copy if present (offline-ready),
+    otherwise the page still works: app.js falls back to a styled <pre> terminal.
+    To vendor locally, run: python scripts/vendor_xterm.py  (see README).
+  -->
+  <link rel="stylesheet" href="/static/vendor/xterm/xterm.min.css" onerror="this.dataset.failed='1'" />
+</head>
+<body class="app-locked">
+  <!-- ─── Entry screen ─── -->
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
   <section id="entryScreen" class="entry-screen">
     <div class="entry-card">
       <div class="entry-brand">
         <span class="entry-badge">onlinecompile</span>
+<<<<<<< HEAD
         <h1>Вход в систему совместного редактирования кода</h1>
         <p>
           Сначала выберите тип пользователя, затем укажите параметры входа и комнату.
@@ -30,13 +45,37 @@
       </div>
 
       <div id="authError" class="auth-error" hidden></div>
+=======
+        <h1>Совместный Python-редактор для занятий</h1>
+        <p>Выберите роль, заполните данные и подключитесь к комнате. Преподаватель создаёт
+           сессию и управляет доступом, студенты подключаются и работают по выданному праву.</p>
+      </div>
+
+      <div class="role-selector" role="tablist" aria-label="Выбор роли">
+        <button type="button" class="role-card active" data-role="host" role="tab" aria-selected="true">
+          <strong>Преподаватель</strong>
+          <span>Создание комнаты, управление доступом, запуск и проверка кода</span>
+        </button>
+        <button type="button" class="role-card" data-role="student" role="tab" aria-selected="false">
+          <strong>Студент</strong>
+          <span>Подключение к комнате и работа по выданному доступу</span>
+        </button>
+      </div>
+
+      <div id="authError" class="auth-error" role="alert" hidden></div>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
 
       <div id="hostPane" class="entry-pane">
         <div class="mode-selector" aria-label="Режим преподавателя">
           <button type="button" class="mode-btn active" data-mode="create">Создать комнату</button>
+<<<<<<< HEAD
           <button type="button" class="mode-btn" data-mode="join">Войти в существующую комнату</button>
         </div>
 
+=======
+          <button type="button" class="mode-btn" data-mode="join">Войти в существующую</button>
+        </div>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         <div class="entry-grid">
           <label>
             <span>Отображаемое имя</span>
@@ -44,20 +83,36 @@
           </label>
           <label>
             <span>Логин преподавателя</span>
+<<<<<<< HEAD
             <input id="hostUsernameInput" type="text" placeholder="Ведущий" autocomplete="username" />
           </label>
           <label>
             <span>Пароль</span>
             <input id="hostPasswordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" />
+=======
+            <input id="hostUsernameInput" type="text" placeholder="HOST" autocomplete="username" />
+          </label>
+          <label>
+            <span>Пароль</span>
+            <span class="password-field">
+              <input id="hostPasswordInput" type="password" placeholder="Введите пароль" autocomplete="current-password" />
+              <button type="button" id="hostPasswordToggle" class="password-toggle" aria-label="Показать пароль" tabindex="-1">Показать</button>
+            </span>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
           </label>
           <label>
             <span>Комната</span>
             <input id="hostRoomInput" type="text" placeholder="onlinecompile" autocomplete="off" />
           </label>
         </div>
+<<<<<<< HEAD
 
         <div class="entry-actions">
           <button type="button" id="hostStartBtn" class="primary-action">Перейти в рабочую страницу преподавателя</button>
+=======
+        <div class="entry-actions">
+          <button type="button" id="hostStartBtn" class="primary-action">Войти как преподаватель</button>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         </div>
       </div>
 
@@ -72,15 +127,24 @@
             <input id="studentRoomInput" type="text" placeholder="onlinecompile" autocomplete="off" />
           </label>
         </div>
+<<<<<<< HEAD
 
         <div class="entry-actions">
           <button type="button" id="studentStartBtn" class="primary-action">Перейти в рабочую страницу студента</button>
+=======
+        <div class="entry-actions">
+          <button type="button" id="studentStartBtn" class="primary-action">Войти как студент</button>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         </div>
       </div>
     </div>
   </section>
 
+<<<<<<< HEAD
   <div id="toast" class="toast" aria-live="polite"></div>
+=======
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
 
   <div id="easterEgg" class="easter-egg" hidden>
     <div class="easter-egg-card">
@@ -91,6 +155,10 @@
     </div>
   </div>
 
+<<<<<<< HEAD
+=======
+  <!-- ─── Main workspace ─── -->
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
   <div class="layout" id="appLayout" hidden>
     <header class="topbar">
       <div class="topbar-left">
@@ -100,11 +168,19 @@
         </div>
         <span id="sessionInfo" class="info-chip">Вы: —</span>
         <span id="connectionBadge" class="info-chip" data-state="idle">Не подключено</span>
+<<<<<<< HEAD
         <span id="autosaveBadge" class="info-chip">Автосохранение: ожидание</span>
         <span id="hostStatusBadge" class="info-chip">Ведущий: онлайн</span>
       </div>
 
       <div class="topbar-right">
+=======
+        <span id="autosaveBadge" class="info-chip" hidden>Автосохранение: ожидание</span>
+        <span id="hostStatusBadge" class="info-chip" data-state="ok">Ведущий: онлайн</span>
+      </div>
+      <div class="topbar-right">
+        <button type="button" id="leaveBtn" class="ghost-btn" title="Выйти из комнаты">Выйти</button>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         <label class="theme-switcher" for="themeSelect">
           <span>Тема</span>
           <select id="themeSelect" aria-label="Тема оформления">
@@ -118,7 +194,11 @@
     </header>
 
     <div id="hostControls" class="teacher-toolbar">
+<<<<<<< HEAD
       <div class="tool-group tool-group-files" aria-label="Файлы">
+=======
+      <div class="tool-group" aria-label="Файлы">
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         <span class="tool-group-label">Файлы</span>
         <select id="fileSelect" title="Текущий файл"></select>
         <button type="button" id="createFileBtn" class="host-only">Новый</button>
@@ -128,13 +208,18 @@
         <input id="importFileInput" type="file" accept=".py,.txt,text/plain" hidden />
       </div>
 
+<<<<<<< HEAD
       <div class="tool-group tool-group-access host-only" aria-label="Доступы">
+=======
+      <div class="tool-group host-only" aria-label="Доступ">
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         <span class="tool-group-label">Доступ</span>
         <select id="participantSelect" title="Студент"></select>
         <button type="button" id="grantBtn">Выдать</button>
         <button type="button" id="revokeBtn">Забрать</button>
       </div>
 
+<<<<<<< HEAD
       <div class="tool-group tool-group-ranges host-only" aria-label="Диапазоны строк">
         <span class="tool-group-label">Строки</span>
         <input id="regionStart" type="number" min="1" placeholder="От" />
@@ -146,6 +231,19 @@
       <div class="tool-group tool-group-reports host-only" aria-label="Отчёты">
         <span class="tool-group-label">Отчёты</span>
         <button type="button" id="blameReportBtn">Blame</button>
+=======
+      <div class="tool-group host-only" aria-label="Диапазон строк">
+        <span class="tool-group-label">Строки</span>
+        <input id="regionStart" type="number" min="1" placeholder="От" title="Первая строка диапазона" />
+        <input id="regionEnd"   type="number" min="1" placeholder="До" title="Последняя строка диапазона" />
+        <button type="button" id="setRegionBtn">Задать</button>
+        <button type="button" id="clearRegionBtn">Сброс</button>
+      </div>
+
+      <div class="tool-group host-only" aria-label="Отчёты">
+        <span class="tool-group-label">Отчёты</span>
+        <button type="button" id="blameReportBtn">Blame-отчет</button>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         <button type="button" id="scoreReportBtn">Доступы</button>
       </div>
     </div>
@@ -155,17 +253,28 @@
         <div class="editor-toolbar">
           <div class="editor-meta">
             <span class="info-chip">Файл: <strong id="currentFile">main.py</strong></span>
+<<<<<<< HEAD
             <span id="lspStatus" class="info-chip">Monaco Editor</span>
+=======
+            <span id="lspStatus" class="info-chip" data-state="idle">Загрузка редактора…</span>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
             <span id="editingUsers" class="editing-users" hidden></span>
           </div>
         </div>
 
         <div class="editor-body">
           <div id="editorStage">
+<<<<<<< HEAD
             <div id="editorMount" aria-label="Python editor"></div>
             <div id="editorUnavailable" class="editor-unavailable" role="alert" tabindex="0" hidden>
               <strong>Monaco Editor не загрузился</strong>
               <span>Проверьте файлы редактора в static/vendor/monaco и перезагрузите страницу.</span>
+=======
+            <div id="editorMount" aria-label="Редактор Python"></div>
+            <div id="editorUnavailable" class="editor-unavailable" role="alert" tabindex="0" hidden>
+              <strong>Редактор кода не загрузился</strong>
+              <span>Проверьте файлы редактора в <code>static/vendor/monaco</code> и перезагрузите страницу.</span>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
             </div>
             <div id="remoteCursors"></div>
           </div>
@@ -173,6 +282,7 @@
 
         <div class="statusbar">
           <span id="cursorPos">Ln 1, Col 1</span>
+<<<<<<< HEAD
           <span id="docVersion">v0</span>
         </div>
 
@@ -186,13 +296,35 @@
             </div>
           </div>
           <pre id="runOutput" class="console-output" title="Вывод прокручивается внутри терминала"></pre>
+=======
+          <span id="docVersion" title="Версия документа">v0</span>
+        </div>
+
+        <!-- ─── terminal ─── -->
+        <section class="console" id="consolePanel">
+          <div class="console-resize-handle" id="consoleResizeHandle" title="Потяните, чтобы изменить высоту"></div>
+          <div class="console-header">
+            <strong>Терминал</strong>
+            <div class="console-actions" id="consoleActions">
+              <button type="button" id="checkBtn" class="host-only" disabled>Синтаксис</button>
+              <button type="button" id="runBtn"   class="host-only" disabled>▶ Запустить</button>
+              <button type="button" id="stopBtn"  class="host-only" disabled>■ Стоп</button>
+              <button type="button" id="clearTermBtn" title="Очистить терминал">Очистить</button>
+            </div>
+          </div>
+          <div id="xtermMount" class="xterm-mount"></div>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
         </section>
       </section>
 
       <aside class="sidebar">
         <div class="sidebar-section participants-section">
           <div class="sidebar-header">
+<<<<<<< HEAD
             <h3>Участники</h3>
+=======
+            <h3>Участники <span id="participantCount" class="count-badge">0</span></h3>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
           </div>
           <ul id="participants"></ul>
         </div>
@@ -206,14 +338,41 @@
           </div>
           <div id="chatBox"></div>
           <div class="chatInput">
+<<<<<<< HEAD
             <input id="chatInput" type="text" placeholder="Сообщение..." />
             <button type="button" id="chatSend">Отправить</button>
+=======
+            <input id="chatInput" type="text" placeholder="Сообщение…" maxlength="1000" />
+            <button type="button" id="chatSend" aria-label="Отправить">→</button>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
           </div>
         </div>
       </aside>
     </main>
   </div>
 
+<<<<<<< HEAD
   <script src="/static/app.js?v=20260531-v7"></script>
+=======
+  <!--
+    xterm.js engine. Tries local vendor copy first (works fully offline), then
+    falls back to CDN. If BOTH are unavailable, app.js renders a styled <pre>
+    terminal so output is never lost. Loading is non-blocking.
+  -->
+  <script>
+    window.__xtermSources = {
+      local: {
+        js:  "/static/vendor/xterm/xterm.min.js",
+        fit: "/static/vendor/xterm/addon-fit.min.js",
+      },
+      cdn: {
+        js:  "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js",
+        fit: "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js",
+        css: "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css",
+      },
+    };
+  </script>
+  <script src="/static/app.js?v=20260605-v18"></script>
+>>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
 </body>
 </html>
