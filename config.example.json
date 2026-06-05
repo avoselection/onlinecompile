@@ -1,0 +1,9 @@
+{
+  "_comment": "Скопируйте этот файл в config.json и замените значения. Пароль храните как bcrypt-хеш (password_hash), а не открытым текстом. Хеш: poetry run python server.py --hash-password \"ваш пароль\"",
+  "hosts": [
+    {
+      "username": "HOST",
+      "password_hash": "$2b$12$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH______________________"
+    }
+  ]
+}
