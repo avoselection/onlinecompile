@@ -31,8 +31,6 @@ __MACOSX/
 .vscode/
 *.swp__pycache__/
 *.pyc
-.claude/
-.claude/
 room_data/
 .DS_Store
 config.json
