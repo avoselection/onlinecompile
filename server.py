@@ -8,6 +8,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -47,6 +48,8 @@ INITIAL_DOC = """# onlinecompile
 print("Hello, students!")
 """
 HOST_RECONNECT_TIMEOUT_SECONDS = 5 * 60
+# How long a student kicked by the teacher is blocked from rejoining the room.
+STUDENT_KICK_BAN_SECONDS = 60 * 60
 AUTOSAVE_FILENAME = "__autosave__.py"
 SESSION_STATE_FILENAME = "session_state.json"
 DOWNLOAD_TTL_SECONDS = 5 * 60
@@ -724,6 +727,7 @@ class Client:
     latency_ms: Optional[int] = None
     access_grants: int = 0
     username: str = ""
+    ip: str = ""
     # Chat anti-spam bookkeeping
     chat_times: List[float] = field(default_factory=list)
     chat_spam_until: float = 0.0
@@ -745,6 +749,8 @@ class Session:
         self.room_id = sanitize_room_id(room_id)
         self.clients: Dict[str, Client] = {}
         self.ip_map: Dict[str, str] = {}
+        # IP → epoch when a teacher-imposed ban on this room expires.
+        self.banned_ips: Dict[str, float] = {}
         self.host_id: Optional[str] = None
         self.host_username: Optional[str] = None
         self.host_reconnect_deadline: Optional[float] = None
@@ -878,6 +884,18 @@ class Session:
         self.blame_by_file = (
             data.get("blame_by_file") if isinstance(data.get("blame_by_file"), dict) else {}
         )
+        raw_bans = data.get("banned_ips")
+        if isinstance(raw_bans, dict):
+            now = time.time()
+            restored: Dict[str, float] = {}
+            for ip, ts in raw_bans.items():
+                try:
+                    expiry = float(ts)
+                except (TypeError, ValueError):
+                    continue
+                if expiry > now:
+                    restored[str(ip)] = expiry
+            self.banned_ips = restored
         self.last_saved_at = data.get("last_saved_at")
         self.ensure_file_blame(self.current_filename, self.doc_text)
 
@@ -896,6 +914,12 @@ class Session:
             "blame_by_file": self.blame_by_file,
             "last_saved_at": utc_iso(),
             "host_username": self.host_username,
+            # Keep only still-active bans so the file does not grow unbounded.
+            "banned_ips": {
+                ip: ts
+                for ip, ts in self.banned_ips.items()
+                if ts > time.time()
+            },
         }
         with self.fs_lock:
             os.makedirs(self.saved_dir, exist_ok=True)
@@ -1970,6 +1994,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 )
                 await ws.close()
                 return
+            ban_until = session.banned_ips.get(client_ip)
+            if ban_until is not None:
+                if time.time() < ban_until:
+                    remaining_min = max(1, math.ceil((ban_until - time.time()) / 60))
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "auth_error",
+                                "message": (
+                                    "Доступ к комнате временно ограничён преподавателем. "
+                                    f"Повторите попытку примерно через {remaining_min} мин."
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    await ws.close()
+                    return
+                # Ban expired — clean it up and let the student in.
+                session.banned_ips.pop(client_ip, None)
             if client_ip in session.ip_map:
                 await ws.send_text(
                     json.dumps(
@@ -1986,6 +2030,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         color = session.next_color()
         client = Client(ws=ws, name=name, role=role, color=color, can_edit=(role == "host"))
         client.username = str(hello.get("username") or "")
+        client.ip = client_ip
         session.clients[client.id] = client
 
         if role == "host":
@@ -2109,6 +2154,37 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         session.active_editor_id = None
                 await session.broadcast_participants()
 
+            elif msg_type == "kick_student":
+                if client.role != "host":
+                    continue
+                target_id = str(msg.get("target_id") or "")
+                target = session.clients.get(target_id)
+                if target is not None and target.role == "student":
+                    if target.ip:
+                        session.banned_ips[target.ip] = (
+                            time.time() + STUDENT_KICK_BAN_SECONDS
+                        )
+                        session.persist_state()
+                    if session.active_editor_id == target_id:
+                        session.active_editor_id = None
+                    with contextlib.suppress(Exception):
+                        await target.ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "kicked",
+                                    "message": (
+                                        "Преподаватель удалил вас из комнаты. "
+                                        "Повторное подключение будет доступно через 1 час."
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                    # Closing the socket triggers the target's disconnect handler,
+                    # which pops it from clients/ip_map and re-broadcasts participants.
+                    with contextlib.suppress(Exception):
+                        await target.ws.close()
+
             elif msg_type == "set_region":
                 if client.role != "host":
                     continue
@@ -2175,6 +2251,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "from_id": client.id,
                     "color": client.color,
                     "text": text,
+                    "ts": now,
                 })
 
             elif msg_type == "check_syntax":

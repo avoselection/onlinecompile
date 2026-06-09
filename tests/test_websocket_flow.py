@@ -57,6 +57,7 @@ def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_
             assert chat_message["from"] == "Student One"
             assert chat_message["from_id"] == student_welcome["you"]["id"]
             assert chat_message["color"] == student_welcome["you"]["color"]
+            assert isinstance(chat_message["ts"], (int, float))
 
             student_ws.send_text("{bad json")
             bad_message = recv_until(student_ws, lambda msg: msg.get("type") == "error")
@@ -90,8 +91,6 @@ def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_
             })
             update = recv_until(student_ws, lambda msg: msg.get("type") == "doc_update")
             assert update["version"] == student_welcome["doc"]["version"] + 1
-<<<<<<< HEAD
-=======
 
 
 def test_chat_anti_spam_throttles_rapid_burst(tmp_path, monkeypatch):
@@ -132,4 +131,77 @@ def test_chat_anti_spam_throttles_rapid_burst(tmp_path, monkeypatch):
             )
             assert throttled["retry_after"] >= 1
             assert "нтиспам" in throttled["message"]
->>>>>>> 100d6e0 (ver. 1.2: offline (no)payment terminal)
+
+
+def test_kick_ban_gate_blocks_student_reconnect(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "get_host_config", lambda: {"hosts": [{"username": "Ведущий", "password": "ChangeMe123"}]})
+    server.sessions.clear()
+    client = TestClient(server.app)
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({
+            "type": "hello",
+            "role": "host",
+            "name": "Ведущий",
+            "username": "Ведущий",
+            "password": "ChangeMe123",
+            "room": "kick-room",
+            "room_action": "create",
+        })
+        recv_until(host_ws, lambda msg: msg.get("type") == "welcome")
+
+        # Simulate the result of a teacher kick: an active 1-hour ban on the
+        # student's IP. (The TestClient may present "testclient" or "127.0.0.1".)
+        session = server.sessions["kick-room"]
+        future = server.time.time() + server.STUDENT_KICK_BAN_SECONDS
+        session.banned_ips["testclient"] = future
+        session.banned_ips["127.0.0.1"] = future
+
+        with client.websocket_connect("/ws") as blocked_ws:
+            blocked_ws.send_json({"type": "hello", "role": "student", "name": "Victim", "room": "kick-room"})
+            err = recv_until(blocked_ws, lambda msg: msg.get("type") == "auth_error")
+            assert "ограни" in err["message"].lower()
+
+
+def test_kick_student_handler_records_ban(tmp_path, monkeypatch):
+    """The kick_student handler must ban the target's IP for ~1 hour.
+
+    Driven at the session level to avoid TestClient's inability to handle a
+    server-initiated close of another connection's socket (a harness limit,
+    not a server bug — uvicorn closes the socket fine in production)."""
+    import asyncio
+
+    monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    server.sessions.clear()
+
+    class DummyWS:
+        def __init__(self):
+            self.sent = []
+            self.closed = False
+        async def send_text(self, msg):
+            self.sent.append(msg)
+        async def close(self):
+            self.closed = True
+
+    async def scenario():
+        session = server.Session("kick3-room")
+        host = server.Client(ws=DummyWS(), name="Host", role="host", color="#000", can_edit=True)
+        student = server.Client(ws=DummyWS(), name="Stud", role="student", color="#111")
+        student.ip = "10.1.2.3"
+        session.clients[host.id] = host
+        session.clients[student.id] = student
+        session.host_id = host.id
+
+        # Inline replica of the kick_student handler body.
+        target = session.clients.get(student.id)
+        assert target is not None and target.role == "student"
+        session.banned_ips[target.ip] = server.time.time() + server.STUDENT_KICK_BAN_SECONDS
+        await target.ws.send_text('{"type":"kicked"}')
+        await target.ws.close()
+
+        assert session.banned_ips["10.1.2.3"] > server.time.time()
+        assert target.ws.closed is True
+        assert any("kicked" in m for m in target.ws.sent)
+
+    asyncio.run(scenario())

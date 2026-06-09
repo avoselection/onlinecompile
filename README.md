@@ -96,4 +96,4 @@ room_data/                 # создаётся автоматически: фа
 Покрытие: проверки санитизации имён файлов, AST-блокировки опасного кода, лимит вложенности скобок, лимит размера документа, выдача прав редактирования студенту, удаление/восстановление текста, остановка бесконечного цикла, цикличность палитры цветов и дебаунс автосохранения.
 
 
-avoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavo
+avoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavoavo
