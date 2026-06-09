@@ -29,4 +29,6 @@ htmlcov/
 __MACOSX/
 .idea/
 .vscode/
-*.swp
+*.swp__pycache__/
+*.pyc
+.claude/
