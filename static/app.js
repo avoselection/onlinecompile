@@ -97,11 +97,13 @@
   const fileSelect = document.getElementById("fileSelect");
   const createFileBtn = document.getElementById("createFileBtn");
   const importFileBtn = document.getElementById("importFileBtn");
+  const saveFileBtn = document.getElementById("saveFileBtn");
   const downloadFileBtn = document.getElementById("downloadFileBtn");
   const downloadAllBtn = document.getElementById("downloadAllBtn");
   const importFileInput = document.getElementById("importFileInput");
   const blameReportBtn = document.getElementById("blameReportBtn");
   const scoreReportBtn = document.getElementById("scoreReportBtn");
+  const copyInviteBtn = document.getElementById("copyInviteBtn");
   const connectionBadge = document.getElementById("connectionBadge");
   const themeSelect = document.getElementById("themeSelect");
 
@@ -692,6 +694,7 @@
       fileSelect.disabled = false;
       createFileBtn.disabled = false;
       importFileBtn.disabled = false;
+      if (saveFileBtn) saveFileBtn.disabled = false;
       if (downloadAllBtn) downloadAllBtn.disabled = false;
       blameReportBtn.disabled = false;
       scoreReportBtn.disabled = false;
@@ -704,6 +707,7 @@
     fileSelect.disabled = true;
     createFileBtn.disabled = true;
     importFileBtn.disabled = true;
+    if (saveFileBtn) saveFileBtn.disabled = true;
     if (downloadAllBtn) downloadAllBtn.disabled = true;
     blameReportBtn.disabled = true;
     scoreReportBtn.disabled = true;
@@ -979,8 +983,6 @@
     pass
 except Exception as error:
     print(error)` },
-      { label: "with", type: "keyword", detail: "контекст", apply: `with open("file.txt", "r", encoding="utf-8") as file:
-    data = file.read()` },
     ];
 
     const documentWords = Array.from(new Set((getEditorText().match(/[A-Za-z_][A-Za-z0-9_]*/g) || [])))
@@ -1436,6 +1438,38 @@ except Exception as error:
     toast(`Скачивание начато: ${safeFilename}`);
   }
 
+  async function copyText(text) {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) throw new Error("Браузер не разрешил скопировать ссылку");
+  }
+
+  async function copyStudentInvite() {
+    if (!state.room) return;
+    try {
+      const response = await fetch(`/api/access-urls?room=${encodeURIComponent(state.room)}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("Не удалось получить адрес для локальной сети");
+      const payload = await response.json();
+      const invite = (payload.urls || []).find((url) => !url.includes("127.0.0.1")) || payload.urls?.[0];
+      if (!invite) throw new Error("Не найден адрес локальной сети");
+      await copyText(invite);
+      toast("Ссылка для студентов скопирована");
+    } catch (error) {
+      toast(error?.message || "Не удалось скопировать ссылку");
+    }
+  }
+
   async function downloadRoomArchive() {
     if (!state.room) return;
     const filename = normalizeArchiveFilename(`${state.room || "onlinecompile"}_files.zip`);
@@ -1588,6 +1622,14 @@ except Exception as error:
       importFileInput.click();
     });
 
+    saveFileBtn?.addEventListener("click", () => {
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        toast("Нет подключения к комнате");
+        return;
+      }
+      state.ws.send(JSON.stringify({ type: "save_py", filename: state.currentFilename, code: getEditorText() }));
+    });
+
     importFileInput?.addEventListener("change", async (event) => {
       const file = event.target?.files?.[0];
       if (!file) return;
@@ -1616,6 +1658,7 @@ except Exception as error:
 
     downloadFileBtn?.addEventListener("click", downloadCurrentEditorFile);
     downloadAllBtn?.addEventListener("click", downloadRoomArchive);
+    copyInviteBtn?.addEventListener("click", copyStudentInvite);
 
     fileSelect.addEventListener("change", () => {
       if (!fileSelect.value) return;

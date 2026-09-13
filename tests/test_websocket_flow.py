@@ -14,6 +14,16 @@ def recv_until(ws, predicate, max_messages=10):
     raise AssertionError(f"Expected WebSocket message was not received, last={last!r}")
 
 
+def test_invitation_uses_the_lan_address_already_opened_by_teacher():
+    client = TestClient(server.app)
+    response = client.get("/api/access-urls?room=lesson 42", headers={"host": "192.168.10.24:8000"})
+
+    assert response.status_code == 200
+    assert response.json()["urls"] == [
+        "http://192.168.10.24:8000/onlinecompile?role=student&room=lesson-42"
+    ]
+
+
 
 def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
@@ -90,3 +100,24 @@ def test_host_student_flow_and_student_can_save_personal_file_with_cooldown(tmp_
             })
             update = recv_until(student_ws, lambda msg: msg.get("type") == "doc_update")
             assert update["version"] == student_welcome["doc"]["version"] + 1
+
+
+def test_student_cannot_reopen_a_saved_room_without_an_active_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DATA_DIR", str(tmp_path))
+    server.sessions.clear()
+    session = server.Session("saved-room")
+    session.persist_state()
+    server.sessions.clear()
+
+    client = TestClient(server.app)
+    with client.websocket_connect("/ws") as student_ws:
+        student_ws.send_json({
+            "type": "hello",
+            "role": "student",
+            "name": "Student One",
+            "room": "saved-room",
+        })
+        message = student_ws.receive_json()
+
+    assert message["type"] == "auth_error"
+    assert "недоступна" in message["message"]

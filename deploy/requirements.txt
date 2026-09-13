@@ -1,0 +1,4 @@
+# Runtime dependencies for the one-click macOS/Windows launchers and Docker.
+fastapi==0.115.14
+uvicorn[standard]==0.30.6
+bcrypt==4.3.0

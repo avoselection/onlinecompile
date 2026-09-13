@@ -69,6 +69,17 @@ def test_run_validation_allows_simple_python_code():
     assert ok, error
 
 
+def test_run_validation_uses_allowlist_for_modules_that_can_open_network_or_processes():
+    for code in (
+        "import asyncio\n",
+        "import subprocess\n",
+        "from socket import socket\n",
+    ):
+        ok, error = server.validate_code_for_run(code)
+        assert not ok
+        assert "не разрешён" in error
+
+
 @pytest.mark.asyncio
 async def test_student_patch_requires_granted_active_editor():
     session = server.Session("demo")

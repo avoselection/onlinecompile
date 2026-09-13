@@ -1,0 +1,10 @@
+services:
+  onlinecompile:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../room_data:/app/room_data
+    restart: unless-stopped

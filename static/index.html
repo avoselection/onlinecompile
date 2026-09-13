@@ -123,6 +123,7 @@
         <select id="fileSelect" title="Текущий файл"></select>
         <button type="button" id="createFileBtn" class="host-only">Новый</button>
         <button type="button" id="importFileBtn" class="host-only">Импорт</button>
+        <button type="button" id="saveFileBtn" class="host-only">Сохранить</button>
         <button type="button" id="downloadFileBtn">Скачать</button>
         <button type="button" id="downloadAllBtn" class="host-only">Скачать всё</button>
         <input id="importFileInput" type="file" accept=".py,.txt,text/plain" hidden />
@@ -147,6 +148,11 @@
         <span class="tool-group-label">Отчёты</span>
         <button type="button" id="blameReportBtn">Blame</button>
         <button type="button" id="scoreReportBtn">Доступы</button>
+      </div>
+
+      <div class="tool-group tool-group-session host-only" aria-label="Приглашение в комнату">
+        <span class="tool-group-label">Сессия</span>
+        <button type="button" id="copyInviteBtn">Скопировать ссылку для студентов</button>
       </div>
     </div>
 

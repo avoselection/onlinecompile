@@ -22,7 +22,7 @@ import tokenize
 import zipfile
 from html import escape
 from urllib.parse import parse_qs, quote
-from asyncio.subprocess import PIPE, Process, create_subprocess_exec
+from asyncio.subprocess import DEVNULL, PIPE, Process, create_subprocess_exec
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -71,10 +71,14 @@ PYTHON_KEYWORDS = {"False", "None", "True", "and", "as", "assert", "async", "awa
     "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
     "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "match", "case"}
 
-BLOCKED_IMPORT_ROOTS = {
-    "builtins", "ctypes", "fcntl", "glob", "http", "importlib", "multiprocessing", "os", "pathlib", "pickle", "pkgutil",
-    "platform", "posix", "resource", "shlex", "shutil", "signal", "socket", "subprocess", "sys", "tempfile",
-    "urllib", "venv",
+# The runner is an educational convenience, not a security boundary.  A small
+# allow-list is still far safer than trying to enumerate every dangerous module:
+# modules such as asyncio can otherwise create sockets or subprocesses without
+# using any of the explicitly blocked names below.
+ALLOWED_IMPORT_ROOTS = {
+    "__future__", "bisect", "collections", "copy", "dataclasses", "datetime",
+    "decimal", "enum", "fractions", "functools", "heapq", "itertools", "json",
+    "math", "operator", "random", "re", "statistics", "string", "time", "typing",
 }
 BLOCKED_CALL_NAMES = {
     "__import__", "breakpoint", "compile", "delattr", "eval", "exec", "getattr", "globals", "input", "locals",
@@ -110,15 +114,42 @@ STUDENT_SAVE_COOLDOWN_SECONDS = bounded_int_from_env(
 )
 
 
-def get_local_access_urls(port: int) -> List[str]:
-    urls = [f"http://127.0.0.1:{port}"]
+def get_local_ipv4_addresses() -> List[str]:
+    """Return likely LAN addresses without requiring an Internet connection."""
+    addresses: List[str] = []
+
+    def add(address: str):
+        if address and not address.startswith("127.") and address not in addresses:
+            addresses.append(address)
+
+    # UDP connect chooses the active network interface locally; no packet is
+    # sent, so this also works in an isolated classroom network.
     with contextlib.suppress(Exception):
-        hostname = socket.gethostname()
-        for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
-            host = sockaddr[0]
-            if host and not host.startswith("127.") and host not in {url.split('//', 1)[1].split(':', 1)[0] for url in urls}:
-                urls.append(f"http://{host}:{port}")
-    return urls
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("10.255.255.255", 1))
+            add(probe.getsockname()[0])
+
+    with contextlib.suppress(Exception):
+        for _, _, _, _, sockaddr in socket.getaddrinfo(
+            socket.gethostname(), None, family=socket.AF_INET, type=socket.SOCK_DGRAM
+        ):
+            add(sockaddr[0])
+
+    def network_priority(address: str) -> Tuple[int, str]:
+        octets = address.split(".")
+        if address.startswith("192.168."):
+            return 0, address
+        if address.startswith("10."):
+            return 1, address
+        if len(octets) == 4 and octets[0] == "172" and octets[1].isdigit() and 16 <= int(octets[1]) <= 31:
+            return 2, address
+        return 3, address
+
+    return sorted(addresses, key=network_priority)
+
+
+def get_local_access_urls(port: int) -> List[str]:
+    return [f"http://127.0.0.1:{port}", *[f"http://{address}:{port}" for address in get_local_ipv4_addresses()]]
 
 
 def preferred_ws_protocol() -> str:
@@ -465,14 +496,14 @@ class RunSafetyVisitor(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
             root = alias.name.split(".", 1)[0]
-            if root in BLOCKED_IMPORT_ROOTS:
-                self.fail(node, f"Импорт модуля '{root}' запрещён в учебном запуске.")
+            if root not in ALLOWED_IMPORT_ROOTS:
+                self.fail(node, f"Импорт модуля '{root}' не разрешён в учебном запуске.")
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         root = (node.module or "").split(".", 1)[0]
-        if root in BLOCKED_IMPORT_ROOTS:
-            self.fail(node, f"Импорт модуля '{root}' запрещён в учебном запуске.")
+        if root not in ALLOWED_IMPORT_ROOTS:
+            self.fail(node, f"Импорт модуля '{root}' не разрешён в учебном запуске.")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call):
@@ -901,6 +932,22 @@ class Session:
         if not proc or proc.returncode is not None:
             return
 
+        if os.name == "nt":
+            # On Windows terminate()/kill() affects only the direct Python
+            # process.  taskkill /T also ends children created by submitted
+            # code, matching killpg() behaviour used on macOS/Linux.
+            try:
+                killer = await create_subprocess_exec(
+                    "taskkill", "/PID", str(proc.pid), "/T", "/F", stdout=DEVNULL, stderr=DEVNULL
+                )
+                await asyncio.wait_for(killer.wait(), timeout=2.0)
+            except Exception:
+                with contextlib.suppress(ProcessLookupError, PermissionError, RuntimeError):
+                    proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            return
+
         def signal_process(sig: Optional[signal.Signals] = None, force: bool = False):
             if os.name == "posix" and sig is not None:
                 try:
@@ -1290,6 +1337,25 @@ async def health():
     return JSONResponse({"ok": True, "sessions": len(sessions)})
 
 
+@app.get("/api/access-urls")
+async def access_urls(request: Request, room: str = ""):
+    """Return ready-to-copy student links for the host's local network."""
+    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    scheme = "https" if request.url.scheme == "https" else "http"
+    safe_room = sanitize_room_id(room)
+    suffix = f"/onlinecompile?role=student&room={quote(safe_room, safe='')}"
+    request_host = request.url.hostname or ""
+    # If the teacher already opened the app by its LAN address, that address is
+    # authoritative.  This is particularly important in Docker, where the
+    # container's own 172.x address is not reachable by classroom devices.
+    if request_host and request_host not in {"localhost", "::1"} and not request_host.startswith("127."):
+        bases = [f"{scheme}://{request.headers.get('host', request_host)}"]
+    else:
+        bases = [url.replace("http://", f"{scheme}://", 1) for url in get_local_access_urls(port)]
+    urls = [base + suffix for base in bases]
+    return JSONResponse({"room": safe_room, "urls": urls})
+
+
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
@@ -1355,6 +1421,8 @@ async def download_all_room_files(room_id: str):
 @app.get("/api/rooms/{room_id}/reports/blame")
 async def blame_report(room_id: str, filename: str = "main.py", format: str = "json"):
     room = sanitize_room_id(room_id)
+    if not can_download_room(room):
+        return JSONResponse({"ok": False, "message": "Время доступа к отчёту истекло. Откройте комнату снова."}, status_code=410)
     session = sessions.get(room) or Session(room)
     rows = session.build_blame_rows(filename)
 
@@ -1373,6 +1441,8 @@ async def blame_report(room_id: str, filename: str = "main.py", format: str = "j
 @app.get("/api/rooms/{room_id}/reports/scores")
 async def access_report(room_id: str, format: str = "json"):
     room = sanitize_room_id(room_id)
+    if not can_download_room(room):
+        return JSONResponse({"ok": False, "message": "Время доступа к отчёту истекло. Откройте комнату снова."}, status_code=410)
     session = sessions.get(room) or Session(room)
     rows = session.access_rows()
 
@@ -1549,15 +1619,18 @@ async def ws_endpoint(ws: WebSocket):
             session.host_username = username
         else:
             session = sessions.get(room)
-            if session is None and room_has_persisted_data(room):
-                session = Session(room)
-                sessions[room] = session
-            if session is None or (session.host_id is None and session.host_reconnect_deadline is None and not room_has_persisted_data(room)):
+            # Persisted data may be reopened by an authenticated host, but it
+            # must not turn into a public room after a server restart.
+            if session is None or (session.host_id is None and session.host_reconnect_deadline is None):
                 await ws.send_text(json.dumps({"type": "auth_error", "message": f"Комната '{room}' недоступна."}, ensure_ascii=False))
                 await ws.close()
                 return
             if client_ip in session.ip_map:
                 await ws.send_text(json.dumps({"type": "auth_error", "message": "С одного устройства разрешён только один студент."}, ensure_ascii=False))
+                await ws.close()
+                return
+            if any(existing.role == "student" and existing.name.casefold() == name.casefold() for existing in session.clients.values()):
+                await ws.send_text(json.dumps({"type": "auth_error", "message": "Студент с таким именем уже подключён к комнате."}, ensure_ascii=False))
                 await ws.close()
                 return
 
